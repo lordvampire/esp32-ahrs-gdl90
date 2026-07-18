@@ -4,27 +4,37 @@ Open-source Aircraft Attitude and Heading Reference System (AHRS) for ESP32.
 Broadcasts GDL90 data over WiFi to **ForeFlight**, **Enroute** and other
 EFB apps that support the GDL90 protocol.
 
-The device creates its own WiFi access point. Connect your iPad/iPhone, and
-attitude (roll, pitch, heading), GPS position and barometric altitude appear
-automatically in the app.
+Supports two operating modes:
+
+- **Standalone Mode** -- creates its own WiFi AP. Connect your iPad/iPhone
+  directly and get AHRS, GPS and barometric altitude in ForeFlight.
+- **Companion Mode** -- automatically joins a nearby **Stratux** WiFi network
+  and provides superior AHRS + barometric altitude alongside Stratux's ADS-B
+  traffic reception.
 
 ## Features
 
 - **ForeFlight compatible** -- recognised as a connected device on the
   ForeFlight Devices page (uses the ForeFlight GDL90 Extended Specification)
+- **Dual-mode operation** -- auto-detects Stratux WiFi at boot; if found,
+  joins as a companion device; otherwise creates its own AP
 - **Dual-port output** -- GDL90 binary on UDP 4000 + ForeFlight text protocol
   (XGPS/XATT) on UDP 49002
 - **AHRS at 5 Hz** -- ForeFlight binary AHRS (0x65/0x01) and XATT attitude
   updates every 200 ms for smooth synthetic vision
 - **Standard GDL90 at 1 Hz** -- Heartbeat, Ownship Report, Ownship Geometric
   Altitude and ForeFlight Device ID
-- **BNO086 sensor fusion** -- hardware ARVR Stabilized Rotation Vector for
-  accurate roll/pitch/heading without software filtering
-- **Barometric altitude** -- BMP390 pressure altitude (ISA, QNH 1013.25 hPa)
+- **BNO086 hardware sensor fusion** -- ARVR Stabilized Rotation Vector for
+  accurate roll/pitch/heading without software filtering (significantly
+  better than Stratux's software-based ICM-20948 AHRS)
+- **BMP390 barometric altitude** -- 4x more accurate than Stratux's BMP280
+  (±0.03 hPa vs ±0.12 hPa relative accuracy)
 - **GPS position & track** -- u-blox NMEA parser with automatic heading source
   switching (GPS track above 5 kt, IMU yaw below)
 - **Watchdog recovery** -- automatic BNO086 re-initialisation on sensor timeout
-- **Up to 4 simultaneous clients**
+- **Auto-reconnect** -- in Companion Mode, automatically reconnects if Stratux
+  WiFi is temporarily lost
+- **Up to 4 simultaneous clients** (Standalone Mode)
 
 ## Hardware
 
@@ -101,9 +111,11 @@ flatpak run cc.arduino.arduinoide --upload \
   esp32-ahrs-gdl90.ino
 ```
 
-## WiFi Configuration
+## Operating Modes
 
-The ESP32 creates a WiFi access point:
+### Standalone Mode
+
+When no Stratux WiFi is found the device creates its own access point:
 
 | Parameter | Value |
 |-----------|-------|
@@ -114,25 +126,71 @@ The ESP32 creates a WiFi access point:
 | ForeFlight Text Port | UDP 49002 |
 | Broadcast | 192.168.10.255 |
 
+The ESP32 provides all data: AHRS, GPS, barometric altitude, Heartbeat and
+ForeFlight Device ID.
+
+### Companion Mode (with Stratux)
+
+At boot the device scans for WiFi networks named `stratux` or `Stratux`
+(case-insensitive). If found, it joins the Stratux network as a client
+and broadcasts on the Stratux subnet.
+
+```
+┌──────────┐                              ┌──────────┐
+│  Stratux │  ADS-B Traffic (0x14)        │  ESP32   │
+│          │──────────────────────────►    │  AHRS    │
+│  ADS-B   │                         │    │          │
+│  receiver│                         │    │  BNO086  │──► AHRS      (0x65/0x01) @ 5 Hz
+│          │                         │    │  BMP390  │──► Ownship   (0x0A)      @ 1 Hz
+└──────────┘                         │    │  GPS     │──► GeoAlt    (0x0B)      @ 1 Hz
+                   ┌─────────┐       │    │          │──► Heartbeat (0x00)      @ 1 Hz
+                   │  iPad   │◄──────┘    │          │──► FF-ID     (0x65/0x00) @ 1 Hz
+                   │ForeFlight◄───────────┘          │──► XGPS/XATT            @ 1-5 Hz
+                   └─────────┘                       └──────────┘
+```
+
+**Stratux settings** (recommended for Companion Mode):
+- AHRS: **off** (ESP32 provides better AHRS via BNO086)
+- Ownship Report: **off** (ESP32 provides it with BMP390 baro)
+- ADS-B traffic: **on**
+
+**Sensor comparison:**
+
+| Sensor | Stratux | ESP32 AHRS | Advantage |
+|--------|---------|------------|-----------|
+| IMU | ICM-20948 (software Kalman) | BNO086 (hardware fusion) | Much lower drift & latency |
+| Barometer | BMP280 (±0.12 hPa) | BMP390 (±0.03 hPa) | 4x more accurate |
+| Baro noise | 1.3 Pa RMS | 0.02 Pa RMS | 65x less noise |
+
 ## EFB App Setup
 
-### ForeFlight (iPad / iPhone)
+### ForeFlight -- Standalone Mode
 
-1. Connect to the **AHRS-GDL90** WiFi network (password: `ahrs1234`).
+1. Connect your iPad to the **AHRS-GDL90** WiFi network (password: `ahrs1234`).
 2. Go to **More > Devices**.
 3. The device appears as **"AHRS-GDL"** with a connected status.
 4. AHRS attitude data is shown on the synthetic vision / attitude indicator.
 
+### ForeFlight -- Companion Mode (with Stratux)
+
+1. Power on Stratux and the ESP32 AHRS.
+2. The ESP32 automatically joins the Stratux WiFi (serial monitor shows
+   `>>> COMPANION MODE <<<`).
+3. Connect your iPad to the **Stratux** WiFi network.
+4. In ForeFlight go to **More > Devices** -- you should see the AHRS device
+   and Stratux traffic.
+5. In Stratux settings, disable AHRS and Ownship to avoid conflicts.
+
 ### Enroute Flight Navigation
 
-1. Connect to the **AHRS-GDL90** WiFi network.
-2. Enroute automatically detects GDL90 traffic on port 4000.
+1. Connect to the **AHRS-GDL90** WiFi network (Standalone) or **Stratux**
+   network (Companion Mode).
+2. Enroute automatically detects GDL90 data on port 4000.
 
 ### Other GDL90-compatible EFBs
 
 Any EFB that supports the GDL90 protocol on UDP port 4000 should work
-(e.g. SkyDemon, AvPlan EFB, FlyQ). Connect to the WiFi AP and the app
-should detect the data stream.
+(e.g. SkyDemon, AvPlan EFB, FlyQ).
 
 ## Protocol Details
 
@@ -174,7 +232,8 @@ All messages use GDL90 framing (0x7E flag bytes, byte-stuffing, CRC-16 CCITT).
 At 115200 baud the system prints status every 2 seconds:
 
 ```
-Roll: -2.3  Pitch: 5.1  Hdg: 270.4 (GPS)  PressAlt: 3250 ft  GPS: FIX  Sats: 9  Clients: 1
+[STANDALONE] Roll: -2.3  Pitch: 5.1  Hdg: 270.4 (GPS)  PressAlt: 3250 ft  GPS: FIX  Sats: 9  Clients: 1
+[COMPANION]  Roll: -2.3  Pitch: 5.1  Hdg: 270.4 (GPS)  PressAlt: 3250 ft  GPS: FIX  Sats: 9  WiFi: OK  RSSI: -45
 ```
 
 ## Error Handling
