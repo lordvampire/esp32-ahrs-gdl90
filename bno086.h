@@ -28,7 +28,7 @@ public:
     bool reinit();
 
     // Attitude in degrees
-    float getRoll() const;   // positive = right wing down
+    float getRoll() const;   // raw sensor value (inversion applied in main sketch)
     float getPitch() const;  // positive = nose up
     float getYaw() const;    // 0-360 magnetic/game heading
 

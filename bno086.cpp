@@ -87,13 +87,12 @@ bool BNO086Handler::update() {
 //   Yaw   = rotation about Z (down),    0-360 degrees
 // --------------------------------------------------------------------------
 void BNO086Handler::quaternionToEuler(float qi, float qj, float qk, float qr) {
-    // Roll (bank angle) — negated to match aircraft convention
-    // (BNO086 X-axis points forward on the board; if the board is mounted
-    //  with the component side up, the sign must be flipped for aviation
-    //  convention where positive roll = right wing down)
+    // Roll (bank angle) — raw value from quaternion.
+    // Sign inversion for aircraft convention (mounting-dependent) is
+    // handled by config.invertRoll in the main sketch.
     float sinr_cosp = 2.0f * (qr * qi + qj * qk);
     float cosr_cosp = 1.0f - 2.0f * (qi * qi + qj * qj);
-    _roll = -atan2f(sinr_cosp, cosr_cosp) * (180.0f / M_PI);
+    _roll = atan2f(sinr_cosp, cosr_cosp) * (180.0f / M_PI);
 
     // Pitch
     float sinp = 2.0f * (qr * qj - qk * qi);

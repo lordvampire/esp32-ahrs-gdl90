@@ -18,22 +18,28 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
+#include <WebServer.h>
 
 #include "bno086.h"
 #include "bmp390.h"
 #include "gps.h"
 #include "gdl90.h"
+#include "config.h"
+#include "webui.h"
 
 // ---- Operating mode --------------------------------------------------------
 enum OpMode { MODE_STANDALONE, MODE_COMPANION };
 OpMode opMode = MODE_STANDALONE;
 
-// ---- WiFi AP configuration (standalone mode) --------------------------------
-static const char *AP_SSID     = "AHRS-GDL90";
-static const char *AP_PASSWORD = "ahrs1234";
+// ---- Runtime config (loaded from NVS) --------------------------------------
+Config config;
 
+// ---- WiFi AP defaults (used if config values are applied) -------------------
 static const IPAddress AP_IP(192, 168, 10, 1);
 static const IPAddress AP_SUBNET(255, 255, 255, 0);
+
+// ---- WebServer on port 80 --------------------------------------------------
+WebServer server(80);
 
 // ---- WiFi Stratux connection (companion mode) -------------------------------
 // Stratux AP is open (no password), DHCP assigns us an IP on 192.168.10.x
@@ -100,10 +106,12 @@ bool scanForStratux() {
         Serial.print(WiFi.RSSI(i));
         Serial.println(" dBm)");
 
-        // Case-insensitive match for "stratux"
+        // Case-insensitive match for configured Stratux SSID
         String lower = ssid;
         lower.toLowerCase();
-        if (lower == "stratux") {
+        String target = String(config.stratuxSSID);
+        target.toLowerCase();
+        if (lower == target) {
             stratuxSSID = ssid;
             Serial.print("  >>> Stratux found: \"");
             Serial.print(ssid);
@@ -184,6 +192,141 @@ void broadcastGDL90(WiFiUDP &udp, uint16_t port,
 }
 
 // ============================================================================
+// WebServer handlers
+// ============================================================================
+void handleRoot() {
+    server.send_P(200, "text/html", WEBUI_HTML);
+}
+
+void handleGetStatus() {
+    float roll  = config.invertRoll ? -imu.getRoll() : imu.getRoll();
+    float pitch = imu.getPitch();
+    float heading;
+    const char *hdgSrc;
+    if (gps.isTrackValid()) {
+        heading = gps.getTrackDeg();
+        hdgSrc = "GPS";
+    } else {
+        heading = imu.getYaw();
+        hdgSrc = "IMU";
+    }
+
+    char json[384];
+    snprintf(json, sizeof(json),
+        "{\"mode\":\"%s\","
+        "\"roll\":%.1f,\"pitch\":%.1f,\"heading\":%.1f,"
+        "\"headingSource\":\"%s\","
+        "\"pressAltFt\":%d,"
+        "\"gpsFix\":%s,\"satellites\":%u,"
+        "\"wifiRSSI\":%d,\"clients\":%d,"
+        "\"uptimeMs\":%lu,"
+        "\"bno086ok\":%s,\"bmp390ok\":%s}",
+        opMode == MODE_COMPANION ? "COMPANION" : "STANDALONE",
+        roll, pitch, heading,
+        hdgSrc,
+        (int)baro.getPressureAltFt(),
+        gps.isFixValid() ? "true" : "false",
+        gps.getSatellites(),
+        (int)WiFi.RSSI(),
+        opMode == MODE_STANDALONE ? (int)WiFi.softAPgetStationNum() : 0,
+        millis(),
+        imu.isWatchdogExpired() ? "false" : "true",
+        baro.getPressureHPa() > 0 ? "true" : "false");
+
+    server.send(200, "application/json", json);
+}
+
+void handleGetSettings() {
+    char json[384];
+    snprintf(json, sizeof(json),
+        "{\"mode\":%u,"
+        "\"apSSID\":\"%s\",\"apPassword\":\"%s\","
+        "\"stratuxSSID\":\"%s\","
+        "\"sendAHRS\":%s,\"sendOwnship\":%s,"
+        "\"sendHeartbeat\":%s,\"sendFFID\":%s,"
+        "\"sendXGPS\":%s,\"sendXATT\":%s,"
+        "\"invertRoll\":%s}",
+        config.mode,
+        config.apSSID, config.apPassword,
+        config.stratuxSSID,
+        config.sendAHRS     ? "true" : "false",
+        config.sendOwnship  ? "true" : "false",
+        config.sendHeartbeat ? "true" : "false",
+        config.sendFFID      ? "true" : "false",
+        config.sendXGPS      ? "true" : "false",
+        config.sendXATT      ? "true" : "false",
+        config.invertRoll    ? "true" : "false");
+
+    server.send(200, "application/json", json);
+}
+
+void handlePostSettings() {
+    String body = server.arg("plain");
+
+    // Minimal JSON parsing — look for key:value pairs
+    auto jsonBool = [&](const char *key) -> int {
+        int idx = body.indexOf(key);
+        if (idx < 0) return -1;
+        int colon = body.indexOf(':', idx);
+        if (colon < 0) return -1;
+        String val = body.substring(colon + 1, colon + 10);
+        val.trim();
+        return val.startsWith("true") ? 1 : 0;
+    };
+
+    auto jsonStr = [&](const char *key, char *dst, size_t maxLen) {
+        String needle = String("\"") + key + "\"";
+        int idx = body.indexOf(needle);
+        if (idx < 0) return;
+        int colon = body.indexOf(':', idx);
+        if (colon < 0) return;
+        int q1 = body.indexOf('"', colon + 1);
+        if (q1 < 0) return;
+        int q2 = body.indexOf('"', q1 + 1);
+        if (q2 < 0) return;
+        String val = body.substring(q1 + 1, q2);
+        strlcpy(dst, val.c_str(), maxLen);
+    };
+
+    auto jsonInt = [&](const char *key) -> int {
+        String needle = String("\"") + key + "\"";
+        int idx = body.indexOf(needle);
+        if (idx < 0) return -1;
+        int colon = body.indexOf(':', idx);
+        if (colon < 0) return -1;
+        String val = body.substring(colon + 1, colon + 10);
+        val.trim();
+        return val.toInt();
+    };
+
+    int mode = jsonInt("mode");
+    if (mode >= 0 && mode <= 2) config.mode = (uint8_t)mode;
+
+    jsonStr("apSSID",      config.apSSID,      sizeof(config.apSSID));
+    jsonStr("apPassword",  config.apPassword,  sizeof(config.apPassword));
+    jsonStr("stratuxSSID", config.stratuxSSID,  sizeof(config.stratuxSSID));
+
+    int v;
+    v = jsonBool("sendAHRS");      if (v >= 0) config.sendAHRS      = v;
+    v = jsonBool("sendOwnship");   if (v >= 0) config.sendOwnship   = v;
+    v = jsonBool("sendHeartbeat"); if (v >= 0) config.sendHeartbeat  = v;
+    v = jsonBool("sendFFID");      if (v >= 0) config.sendFFID       = v;
+    v = jsonBool("sendXGPS");      if (v >= 0) config.sendXGPS       = v;
+    v = jsonBool("sendXATT");      if (v >= 0) config.sendXATT       = v;
+    v = jsonBool("invertRoll");    if (v >= 0) config.invertRoll     = v;
+
+    saveConfig(config);
+
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleReboot() {
+    server.send(200, "application/json", "{\"ok\":true}");
+    delay(500);
+    ESP.restart();
+}
+
+// ============================================================================
 // setup()
 // ============================================================================
 void setup() {
@@ -218,21 +361,41 @@ void setup() {
     gps.begin();
     Serial.println("OK (waiting for fix)");
 
-    // ---- WiFi mode detection -----------------------------------------------
+    // ---- Load config from NVS ----------------------------------------------
+    loadConfig(config);
+    Serial.print("Config loaded. Mode: ");
+    Serial.println(config.mode == 0 ? "Auto" : config.mode == 1 ? "Force-Standalone" : "Force-Companion");
+
+    // ---- WiFi mode detection (respects config.mode) ------------------------
     Serial.println();
-    if (scanForStratux()) {
-        // ---- COMPANION MODE ------------------------------------------------
+    if (config.mode == 0) {
+        // Auto: scan for Stratux (current v0.2 behavior)
+        if (scanForStratux()) {
+            if (connectToStratux()) {
+                opMode = MODE_COMPANION;
+                Serial.println();
+                Serial.println(">>> COMPANION MODE <<<");
+                Serial.println("    AHRS + Ownship (BMP390/GPS) on Stratux network");
+                Serial.println("    Stratux provides ADS-B traffic");
+            } else {
+                Serial.println("Stratux connection failed, falling back to Standalone.");
+                opMode = MODE_STANDALONE;
+            }
+        }
+    } else if (config.mode == 2) {
+        // Force-Companion: skip scan, connect directly
+        Serial.println("Force-Companion mode: connecting to Stratux...");
+        stratuxSSID = config.stratuxSSID;
         if (connectToStratux()) {
             opMode = MODE_COMPANION;
             Serial.println();
-            Serial.println(">>> COMPANION MODE <<<");
-            Serial.println("    AHRS + Ownship (BMP390/GPS) on Stratux network");
-            Serial.println("    Stratux provides ADS-B traffic");
+            Serial.println(">>> COMPANION MODE (forced) <<<");
         } else {
             Serial.println("Stratux connection failed, falling back to Standalone.");
             opMode = MODE_STANDALONE;
         }
     }
+    // config.mode == 1 (Force-Standalone) skips all scanning
 
     if (opMode == MODE_STANDALONE) {
         // ---- STANDALONE MODE -----------------------------------------------
@@ -243,10 +406,10 @@ void setup() {
         delay(100);
         WiFi.softAPConfig(AP_IP, AP_IP, AP_SUBNET);
         delay(100);
-        WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4);
+        WiFi.softAP(config.apSSID, config.apPassword, 1, 0, 4);
         delay(500);
         Serial.print("SSID: ");
-        Serial.print(AP_SSID);
+        Serial.print(config.apSSID);
         Serial.print("  IP: ");
         Serial.println(WiFi.softAPIP());
     }
@@ -263,6 +426,15 @@ void setup() {
     Serial.print("ForeFlight XGPS/XATT on port ");
     Serial.println(FF_SIM_PORT);
 
+    // ---- WebServer ---------------------------------------------------------
+    server.on("/",             HTTP_GET,  handleRoot);
+    server.on("/api/status",   HTTP_GET,  handleGetStatus);
+    server.on("/api/settings", HTTP_GET,  handleGetSettings);
+    server.on("/api/settings", HTTP_POST, handlePostSettings);
+    server.on("/api/reboot",   HTTP_POST, handleReboot);
+    server.begin();
+    Serial.println("WebServer started on port 80");
+
     Serial.println();
     Serial.println("Setup complete. Running...");
     Serial.println();
@@ -277,6 +449,9 @@ void setup() {
 // ============================================================================
 void loop() {
     unsigned long now = millis();
+
+    // ---- Handle HTTP requests (non-blocking, ~1ms) -------------------------
+    server.handleClient();
 
     // ---- Companion mode: check WiFi connection, reconnect if lost ----------
     if (opMode == MODE_COMPANION && WiFi.status() != WL_CONNECTED) {
@@ -321,17 +496,21 @@ void loop() {
     if (now - lastAHRSMs >= AHRS_INTERVAL_MS) {
         lastAHRSMs = now;
 
-        float roll  = imu.getRoll();
+        float roll  = config.invertRoll ? -imu.getRoll() : imu.getRoll();
         float pitch = imu.getPitch();
 
         // ForeFlight binary AHRS (0x65 sub 0x01) on port 4000
-        uint16_t ahrsLen = gdl90.buildForeFlightAHRS(frameBuf, roll, pitch, heading);
-        broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, ahrsLen);
+        if (config.sendAHRS) {
+            uint16_t ahrsLen = gdl90.buildForeFlightAHRS(frameBuf, roll, pitch, heading);
+            broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, ahrsLen);
+        }
 
         // ForeFlight text XATT on port 49002
-        for (int t = 0; t < numTargets; t++) {
-            gdl90.sendXATT(udpFFSim, targets[t], FF_SIM_PORT,
-                           heading, pitch, roll);
+        if (config.sendXATT) {
+            for (int t = 0; t < numTargets; t++) {
+                gdl90.sendXATT(udpFFSim, targets[t], FF_SIM_PORT,
+                               heading, pitch, roll);
+            }
         }
     }
 
@@ -357,31 +536,38 @@ void loop() {
         int32_t geoAlt = (int32_t)gps.getAltitudeFt();
 
         // Heartbeat (0x00)
-        uint16_t hbLen = gdl90.buildHeartbeat(frameBuf);
-        broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, hbLen);
+        if (config.sendHeartbeat) {
+            uint16_t hbLen = gdl90.buildHeartbeat(frameBuf);
+            broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, hbLen);
+        }
 
         // ForeFlight Device ID (0x65 sub 0x00)
-        uint16_t ffLen = gdl90.buildForeFlightID(frameBuf);
-        broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, ffLen);
+        if (config.sendFFID) {
+            uint16_t ffLen = gdl90.buildForeFlightID(frameBuf);
+            broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, ffLen);
+        }
 
-        // Ownship Report (0x0A) — always from ESP32 (BMP390 baro + GPS)
-        uint16_t osLen = gdl90.buildOwnshipReport(frameBuf,
-                                        lat, lon,
-                                        pressAltFt,
-                                        track, speedKt,
-                                        nic, nacp);
-        broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, osLen);
+        // Ownship Report (0x0A) + Geometric Altitude (0x0B)
+        if (config.sendOwnship) {
+            uint16_t osLen = gdl90.buildOwnshipReport(frameBuf,
+                                            lat, lon,
+                                            pressAltFt,
+                                            track, speedKt,
+                                            nic, nacp);
+            broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, osLen);
 
-        // Ownship Geometric Altitude (0x0B)
-        uint16_t gaLen = gdl90.buildOwnshipGeoAlt(frameBuf, geoAlt);
-        broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, gaLen);
+            uint16_t gaLen = gdl90.buildOwnshipGeoAlt(frameBuf, geoAlt);
+            broadcastGDL90(udpGDL90, GDL90_PORT, frameBuf, gaLen);
+        }
 
         // XGPS on port 49002
-        float altMslM = gps.getAltitudeFt() * 0.3048f;
-        float gsMs    = speedKt * 0.514444f;
-        for (int t = 0; t < numTargets; t++) {
-            gdl90.sendXGPS(udpFFSim, targets[t], FF_SIM_PORT,
-                           lat, lon, altMslM, track, gsMs);
+        if (config.sendXGPS) {
+            float altMslM = gps.getAltitudeFt() * 0.3048f;
+            float gsMs    = speedKt * 0.514444f;
+            for (int t = 0; t < numTargets; t++) {
+                gdl90.sendXGPS(udpFFSim, targets[t], FF_SIM_PORT,
+                               lat, lon, altMslM, track, gsMs);
+            }
         }
     }
 
@@ -396,8 +582,9 @@ void loop() {
             Serial.print("[STANDALONE] ");
         }
 
+        float dbgRoll = config.invertRoll ? -imu.getRoll() : imu.getRoll();
         Serial.print("Roll: ");
-        Serial.print(imu.getRoll(), 1);
+        Serial.print(dbgRoll, 1);
         Serial.print("  Pitch: ");
         Serial.print(imu.getPitch(), 1);
         Serial.print("  Hdg: ");
