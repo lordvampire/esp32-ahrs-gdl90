@@ -67,6 +67,10 @@ GDL90         gdl90;
 WiFiUDP       udpGDL90;     // port 4000
 WiFiUDP       udpFFSim;     // port 49002
 
+// ---- Runtime sensor status (true = initialized successfully) ---------------
+bool bno086ok = false;
+bool bmp390ok = false;
+
 // ---- Timing state ----------------------------------------------------------
 unsigned long lastGDL90Ms  = 0;
 unsigned long lastAHRSMs   = 0;
@@ -199,45 +203,49 @@ void handleRoot() {
 }
 
 void handleGetStatus() {
-    float roll  = config.invertRoll ? -imu.getRoll() : imu.getRoll();
-    float pitch = imu.getPitch();
+    float roll  = bno086ok ? (config.invertRoll ? -imu.getRoll() : imu.getRoll()) : 0;
+    float pitch = bno086ok ? imu.getPitch() : 0;
     float heading;
     const char *hdgSrc;
-    if (gps.isTrackValid()) {
+    if (config.enableGPS && gps.isTrackValid()) {
         heading = gps.getTrackDeg();
         hdgSrc = "GPS";
-    } else {
+    } else if (bno086ok) {
         heading = imu.getYaw();
         hdgSrc = "IMU";
+    } else {
+        heading = 0;
+        hdgSrc = "NONE";
     }
 
-    char json[384];
+    char json[448];
     snprintf(json, sizeof(json),
         "{\"mode\":\"%s\","
         "\"roll\":%.1f,\"pitch\":%.1f,\"heading\":%.1f,"
         "\"headingSource\":\"%s\","
         "\"pressAltFt\":%d,"
-        "\"gpsFix\":%s,\"satellites\":%u,"
+        "\"gpsFix\":%s,\"gpsEnabled\":%s,\"satellites\":%u,"
         "\"wifiRSSI\":%d,\"clients\":%d,"
         "\"uptimeMs\":%lu,"
         "\"bno086ok\":%s,\"bmp390ok\":%s}",
         opMode == MODE_COMPANION ? "COMPANION" : "STANDALONE",
         roll, pitch, heading,
         hdgSrc,
-        (int)baro.getPressureAltFt(),
-        gps.isFixValid() ? "true" : "false",
-        gps.getSatellites(),
+        bmp390ok ? (int)baro.getPressureAltFt() : 0,
+        (config.enableGPS && gps.isFixValid()) ? "true" : "false",
+        config.enableGPS ? "true" : "false",
+        config.enableGPS ? gps.getSatellites() : 0,
         (int)WiFi.RSSI(),
         opMode == MODE_STANDALONE ? (int)WiFi.softAPgetStationNum() : 0,
         millis(),
-        imu.isWatchdogExpired() ? "false" : "true",
-        baro.getPressureHPa() > 0 ? "true" : "false");
+        bno086ok ? "true" : "false",
+        bmp390ok ? "true" : "false");
 
     server.send(200, "application/json", json);
 }
 
 void handleGetSettings() {
-    char json[384];
+    char json[448];
     snprintf(json, sizeof(json),
         "{\"mode\":%u,"
         "\"apSSID\":\"%s\",\"apPassword\":\"%s\","
@@ -245,17 +253,21 @@ void handleGetSettings() {
         "\"sendAHRS\":%s,\"sendOwnship\":%s,"
         "\"sendHeartbeat\":%s,\"sendFFID\":%s,"
         "\"sendXGPS\":%s,\"sendXATT\":%s,"
-        "\"invertRoll\":%s}",
+        "\"invertRoll\":%s,"
+        "\"enableBNO086\":%s,\"enableBMP390\":%s,\"enableGPS\":%s}",
         config.mode,
         config.apSSID, config.apPassword,
         config.stratuxSSID,
-        config.sendAHRS     ? "true" : "false",
-        config.sendOwnship  ? "true" : "false",
+        config.sendAHRS      ? "true" : "false",
+        config.sendOwnship   ? "true" : "false",
         config.sendHeartbeat ? "true" : "false",
-        config.sendFFID      ? "true" : "false",
-        config.sendXGPS      ? "true" : "false",
-        config.sendXATT      ? "true" : "false",
-        config.invertRoll    ? "true" : "false");
+        config.sendFFID       ? "true" : "false",
+        config.sendXGPS       ? "true" : "false",
+        config.sendXATT       ? "true" : "false",
+        config.invertRoll     ? "true" : "false",
+        config.enableBNO086   ? "true" : "false",
+        config.enableBMP390   ? "true" : "false",
+        config.enableGPS      ? "true" : "false");
 
     server.send(200, "application/json", json);
 }
@@ -314,6 +326,9 @@ void handlePostSettings() {
     v = jsonBool("sendXGPS");      if (v >= 0) config.sendXGPS       = v;
     v = jsonBool("sendXATT");      if (v >= 0) config.sendXATT       = v;
     v = jsonBool("invertRoll");    if (v >= 0) config.invertRoll     = v;
+    v = jsonBool("enableBNO086");  if (v >= 0) config.enableBNO086   = v;
+    v = jsonBool("enableBMP390");  if (v >= 0) config.enableBMP390   = v;
+    v = jsonBool("enableGPS");     if (v >= 0) config.enableGPS      = v;
 
     saveConfig(config);
 
@@ -340,31 +355,45 @@ void setup() {
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(400000);
 
-    // ---- BNO086 init -------------------------------------------------------
-    Serial.print("Initializing BNO086... ");
-    if (!imu.begin(Wire)) {
-        Serial.println("FAILED — BNO086 not found. Check wiring / I2C address.");
-        while (true) { delay(1000); }
-    }
-    Serial.println("OK");
-
-    // ---- BMP390 init -------------------------------------------------------
-    Serial.print("Initializing BMP390... ");
-    if (!baro.begin(Wire)) {
-        Serial.println("FAILED — BMP390 not found. Check wiring / I2C address.");
-        while (true) { delay(1000); }
-    }
-    Serial.println("OK");
-
-    // ---- GPS init ----------------------------------------------------------
-    Serial.print("Initializing GPS (UART2)... ");
-    gps.begin();
-    Serial.println("OK (waiting for fix)");
-
-    // ---- Load config from NVS ----------------------------------------------
+    // ---- Load config from NVS (before sensor init so enable flags apply) ---
     loadConfig(config);
     Serial.print("Config loaded. Mode: ");
     Serial.println(config.mode == 0 ? "Auto" : config.mode == 1 ? "Force-Standalone" : "Force-Companion");
+
+    // ---- BNO086 init -------------------------------------------------------
+    if (config.enableBNO086) {
+        Serial.print("Initializing BNO086... ");
+        if (imu.begin(Wire)) {
+            bno086ok = true;
+            Serial.println("OK");
+        } else {
+            Serial.println("FAILED — BNO086 not found. Continuing without IMU.");
+        }
+    } else {
+        Serial.println("BNO086 disabled in config.");
+    }
+
+    // ---- BMP390 init -------------------------------------------------------
+    if (config.enableBMP390) {
+        Serial.print("Initializing BMP390... ");
+        if (baro.begin(Wire)) {
+            bmp390ok = true;
+            Serial.println("OK");
+        } else {
+            Serial.println("FAILED — BMP390 not found. Continuing without Baro.");
+        }
+    } else {
+        Serial.println("BMP390 disabled in config.");
+    }
+
+    // ---- GPS init ----------------------------------------------------------
+    if (config.enableGPS) {
+        Serial.print("Initializing GPS (UART2)... ");
+        gps.begin();
+        Serial.println("OK (waiting for fix)");
+    } else {
+        Serial.println("GPS disabled in config.");
+    }
 
     // ---- WiFi mode detection (respects config.mode) ------------------------
     Serial.println();
@@ -461,43 +490,47 @@ void loop() {
             connectToStratux();
         }
         // Don't send data while disconnected
-        imu.update();
-        gps.update();
+        if (bno086ok) imu.update();
+        if (config.enableGPS) gps.update();
         return;
     }
 
     // ---- 1. Read IMU (non-blocking) ----------------------------------------
-    imu.update();
+    if (bno086ok) imu.update();
 
     // ---- Watchdog: re-init BNO086 if stale ---------------------------------
-    static unsigned long lastWatchdogAttempt = 0;
-    if (imu.isWatchdogExpired() && (now - lastWatchdogAttempt > 10000)) {
-        lastWatchdogAttempt = now;
-        Serial.println("WARNING: BNO086 watchdog expired, attempting re-init...");
-        if (imu.reinit()) {
-            Serial.println("BNO086 re-initialized OK");
-        } else {
-            Serial.println("BNO086 re-init FAILED");
+    if (bno086ok) {
+        static unsigned long lastWatchdogAttempt = 0;
+        if (imu.isWatchdogExpired() && (now - lastWatchdogAttempt > 10000)) {
+            lastWatchdogAttempt = now;
+            Serial.println("WARNING: BNO086 watchdog expired, attempting re-init...");
+            if (imu.reinit()) {
+                Serial.println("BNO086 re-initialized OK");
+            } else {
+                Serial.println("BNO086 re-init FAILED");
+            }
         }
     }
 
     // ---- 2. Read GPS NMEA (non-blocking) -----------------------------------
-    gps.update();
+    if (config.enableGPS) gps.update();
 
     // ---- 3. Determine heading ----------------------------------------------
     float heading;
-    if (gps.isTrackValid()) {
+    if (config.enableGPS && gps.isTrackValid()) {
         heading = gps.getTrackDeg();
-    } else {
+    } else if (bno086ok) {
         heading = imu.getYaw();
+    } else {
+        heading = 0;
     }
 
     // ---- 4. 5 Hz: ForeFlight AHRS + XATT ----------------------------------
     if (now - lastAHRSMs >= AHRS_INTERVAL_MS) {
         lastAHRSMs = now;
 
-        float roll  = config.invertRoll ? -imu.getRoll() : imu.getRoll();
-        float pitch = imu.getPitch();
+        float roll  = bno086ok ? (config.invertRoll ? -imu.getRoll() : imu.getRoll()) : 0;
+        float pitch = bno086ok ? imu.getPitch() : 0;
 
         // ForeFlight binary AHRS (0x65 sub 0x01) on port 4000
         if (config.sendAHRS) {
@@ -519,21 +552,22 @@ void loop() {
         lastGDL90Ms = now;
 
         // Read barometer
-        baro.update();
+        if (bmp390ok) baro.update();
 
         // NIC/NACp
-        uint8_t nic  = gps.isFixValid() ? 8 : 0;
-        uint8_t nacp = gps.isFixValid() ? 8 : 0;
+        bool gpsFix = config.enableGPS && gps.isFixValid();
+        uint8_t nic  = gpsFix ? 8 : 0;
+        uint8_t nacp = gpsFix ? 8 : 0;
 
         // Pressure altitude from BMP390
-        int32_t pressAltFt = (int32_t)baro.getPressureAltFt();
+        int32_t pressAltFt = bmp390ok ? (int32_t)baro.getPressureAltFt() : 0;
 
         // GPS-derived values
-        double lat     = gps.getLatitude();
-        double lon     = gps.getLongitude();
-        float  speedKt = gps.getSpeedKnots();
-        float  track   = gps.isTrackValid() ? gps.getTrackDeg() : heading;
-        int32_t geoAlt = (int32_t)gps.getAltitudeFt();
+        double lat     = config.enableGPS ? gps.getLatitude()   : 0;
+        double lon     = config.enableGPS ? gps.getLongitude()  : 0;
+        float  speedKt = config.enableGPS ? gps.getSpeedKnots() : 0;
+        float  track   = (config.enableGPS && gps.isTrackValid()) ? gps.getTrackDeg() : heading;
+        int32_t geoAlt = config.enableGPS ? (int32_t)gps.getAltitudeFt() : 0;
 
         // Heartbeat (0x00)
         if (config.sendHeartbeat) {
@@ -562,7 +596,7 @@ void loop() {
 
         // XGPS on port 49002
         if (config.sendXGPS) {
-            float altMslM = gps.getAltitudeFt() * 0.3048f;
+            float altMslM = (config.enableGPS ? gps.getAltitudeFt() : 0) * 0.3048f;
             float gsMs    = speedKt * 0.514444f;
             for (int t = 0; t < numTargets; t++) {
                 gdl90.sendXGPS(udpFFSim, targets[t], FF_SIM_PORT,
@@ -582,32 +616,44 @@ void loop() {
             Serial.print("[STANDALONE] ");
         }
 
-        float dbgRoll = config.invertRoll ? -imu.getRoll() : imu.getRoll();
-        Serial.print("Roll: ");
-        Serial.print(dbgRoll, 1);
-        Serial.print("  Pitch: ");
-        Serial.print(imu.getPitch(), 1);
-        Serial.print("  Hdg: ");
-        if (gps.isTrackValid()) {
-            Serial.print(gps.getTrackDeg(), 1);
-            Serial.print(" (GPS)");
+        if (bno086ok) {
+            float dbgRoll = config.invertRoll ? -imu.getRoll() : imu.getRoll();
+            Serial.print("Roll: ");
+            Serial.print(dbgRoll, 1);
+            Serial.print("  Pitch: ");
+            Serial.print(imu.getPitch(), 1);
+            Serial.print("  Hdg: ");
+            if (config.enableGPS && gps.isTrackValid()) {
+                Serial.print(gps.getTrackDeg(), 1);
+                Serial.print(" (GPS)");
+            } else {
+                Serial.print(imu.getYaw(), 1);
+                Serial.print(" (IMU)");
+            }
         } else {
-            Serial.print(imu.getYaw(), 1);
-            Serial.print(" (IMU)");
+            Serial.print("IMU: OFF");
         }
 
-        Serial.print("  PressAlt: ");
-        Serial.print(baro.getPressureAltFt(), 0);
-        Serial.print(" ft");
-
-        Serial.print("  GPS: ");
-        if (gps.isFixValid()) {
-            Serial.print("FIX");
+        if (bmp390ok) {
+            Serial.print("  PressAlt: ");
+            Serial.print(baro.getPressureAltFt(), 0);
+            Serial.print(" ft");
         } else {
-            Serial.print("NO FIX");
+            Serial.print("  Baro: OFF");
         }
-        Serial.print("  Sats: ");
-        Serial.print(gps.getSatellites());
+
+        if (config.enableGPS) {
+            Serial.print("  GPS: ");
+            if (gps.isFixValid()) {
+                Serial.print("FIX");
+            } else {
+                Serial.print("NO FIX");
+            }
+            Serial.print("  Sats: ");
+            Serial.print(gps.getSatellites());
+        } else {
+            Serial.print("  GPS: OFF");
+        }
 
         if (opMode == MODE_STANDALONE) {
             Serial.print("  Clients: ");

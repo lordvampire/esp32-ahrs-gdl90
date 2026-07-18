@@ -26,6 +26,9 @@ struct Config {
 
     // Sensor options
     bool invertRoll;
+    bool enableBNO086;   // enable BNO086 IMU init
+    bool enableBMP390;   // enable BMP390 baro init
+    bool enableGPS;      // enable GPS init
 };
 
 // ---- NVS namespace --------------------------------------------------------
@@ -46,6 +49,10 @@ inline void defaultConfig(Config &cfg) {
     cfg.sendXATT       = true;
 
     cfg.invertRoll     = true; // Current behavior (was hardcoded)
+
+    cfg.enableBNO086   = true;
+    cfg.enableBMP390   = true;
+    cfg.enableGPS      = true;
 }
 
 // ---- Load from NVS (fills defaults first, then overwrites with stored) -----
@@ -76,6 +83,9 @@ inline void loadConfig(Config &cfg) {
     cfg.sendXGPS       = prefs.getBool("sendXGPS",       cfg.sendXGPS);
     cfg.sendXATT       = prefs.getBool("sendXATT",       cfg.sendXATT);
     cfg.invertRoll     = prefs.getBool("invertRoll",     cfg.invertRoll);
+    cfg.enableBNO086   = prefs.getBool("enBNO086",       cfg.enableBNO086);
+    cfg.enableBMP390   = prefs.getBool("enBMP390",       cfg.enableBMP390);
+    cfg.enableGPS      = prefs.getBool("enGPS",          cfg.enableGPS);
 
     prefs.end();
 }
@@ -99,6 +109,9 @@ inline void saveConfig(const Config &cfg) {
     prefs.putBool("sendXGPS",       cfg.sendXGPS);
     prefs.putBool("sendXATT",       cfg.sendXATT);
     prefs.putBool("invertRoll",     cfg.invertRoll);
+    prefs.putBool("enBNO086",       cfg.enableBNO086);
+    prefs.putBool("enBMP390",       cfg.enableBMP390);
+    prefs.putBool("enGPS",          cfg.enableGPS);
 
     prefs.end();
 }

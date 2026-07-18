@@ -97,6 +97,9 @@ button{flex:1;padding:10px;border:none;border-radius:6px;font-size:14px;font-wei
 <label><span>XATT (port 49002)</span><input type="checkbox" id="cfgXATT"></label>
 
 <h2>Sensor Options</h2>
+<label><span>BNO086 (IMU)</span><input type="checkbox" id="cfgBNO086"></label>
+<label><span>BMP390 (Baro)</span><input type="checkbox" id="cfgBMP390"></label>
+<label><span>GPS</span><input type="checkbox" id="cfgGPSEn"></label>
 <label><span>Invert Roll</span><input type="checkbox" id="cfgInvertRoll"></label>
 
 <div class="btn-row">
@@ -121,8 +124,8 @@ function updateStatus(){
     $('sHeading').textContent=d.heading.toFixed(1)+'\u00B0';
     $('sHdgSrc').textContent=d.headingSource;
     $('sAlt').textContent=d.pressAltFt+' ft';
-    $('sGPS').textContent=d.gpsFix?'FIX':'NO FIX';
-    $('sGPS').className='val '+(d.gpsFix?'ok':'err');
+    $('sGPS').textContent=d.gpsEnabled?(d.gpsFix?'FIX':'NO FIX'):'OFF';
+    $('sGPS').className='val '+(d.gpsEnabled?(d.gpsFix?'ok':'err'):'');
     $('sSats').textContent=d.satellites;
     $('sRSSI').textContent=d.wifiRSSI+' dBm';
     $('sClients').textContent=d.clients;
@@ -130,7 +133,7 @@ function updateStatus(){
     var sh='';
     sh+='<span class="sensor" style="background:'+(d.bno086ok?'#1b5e20':'#b71c1c')+'">BNO086</span>';
     sh+='<span class="sensor" style="background:'+(d.bmp390ok?'#1b5e20':'#b71c1c')+'">BMP390</span>';
-    sh+='<span class="sensor" style="background:'+(d.gpsFix?'#1b5e20':'#e65100')+'">GPS</span>';
+    sh+='<span class="sensor" style="background:'+(d.gpsEnabled?(d.gpsFix?'#1b5e20':'#e65100'):'#555')+'">GPS</span>';
     $('sSensors').innerHTML=sh;
   }).catch(function(){});
 }
@@ -147,6 +150,9 @@ function loadSettings(){
     $('cfgFFID').checked=d.sendFFID;
     $('cfgXGPS').checked=d.sendXGPS;
     $('cfgXATT').checked=d.sendXATT;
+    $('cfgBNO086').checked=d.enableBNO086;
+    $('cfgBMP390').checked=d.enableBMP390;
+    $('cfgGPSEn').checked=d.enableGPS;
     $('cfgInvertRoll').checked=d.invertRoll;
   }).catch(function(){$('msg').textContent='Failed to load settings';});
 }
@@ -163,6 +169,9 @@ function saveSettings(){
     sendFFID:$('cfgFFID').checked,
     sendXGPS:$('cfgXGPS').checked,
     sendXATT:$('cfgXATT').checked,
+    enableBNO086:$('cfgBNO086').checked,
+    enableBMP390:$('cfgBMP390').checked,
+    enableGPS:$('cfgGPSEn').checked,
     invertRoll:$('cfgInvertRoll').checked
   });
   fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:body})
