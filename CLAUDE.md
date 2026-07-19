@@ -1,10 +1,12 @@
 # ESP32 AHRS GDL90 — Project Notes
 
-## Current State (v0.2 + roll fix)
+## Current State (v0.4)
 
 Working ForeFlight-compatible AHRS with dual-mode operation:
 - **Standalone Mode**: Own WiFi AP, full GDL90 output
 - **Companion Mode**: Auto-joins Stratux WiFi, broadcasts on Stratux subnet
+- **Web Configuration**: Browser-based settings via `http://192.168.10.1`
+- **Per-Sensor Config**: BNO086, BMP390 and GPS individually enable/disable via WebUI, persisted in NVS
 
 ### Known Issues (Companion Mode)
 1. **Ownship conflict**: When Stratux GPS is enabled, both devices send
@@ -32,43 +34,50 @@ flatpak run cc.arduino.arduinoide --upload \
 
 ---
 
-## Project v0.3 — Web Configuration Interface
+## v0.3 — Web Configuration Interface (completed)
 
-**Goal**: Browser-based settings page on the ESP32 (like Stratux has), reachable
-via `http://192.168.10.1` (Standalone) or assigned IP (Companion).
+Browser-based settings page on the ESP32, reachable via `http://192.168.10.1`
+(Standalone) or assigned IP (Companion). ESP32 WebServer with inline HTML/CSS/JS,
+settings stored in NVS.
 
-**Approach**: ESP32 WebServer (Ansatz A) — simple HTTP server with inline
-HTML/CSS/JS, settings stored in NVS (ESP32 flash).
+### REST Endpoints
+- `GET /` — main settings page
+- `GET /api/status` — JSON with live sensor data + mode
+- `POST /api/settings` — save settings to NVS
+- `GET /api/settings` — read current settings
 
-### Configurable Parameters
-- **Mode**: Standalone / Companion / Force-Standalone (skip Stratux scan)
-- **AHRS senden**: on/off
-- **Ownship Report senden**: on/off (fixes Companion Mode conflict)
-- **ForeFlight ID senden**: on/off (fixes name flicker)
-- **WiFi SSID/Password**: for own AP
-- **Stratux SSID**: custom name (default: "stratux")
-- **Roll inversion**: on/off (for different BNO086 mounting orientations)
-- **Sensor status**: Live display of Roll/Pitch/Heading/Baro/GPS
-
-### Implementation Plan
-1. Add `<WebServer.h>` and `<Preferences.h>` (NVS) to the sketch
-2. Create HTML page as `const char[]` in a new `webui.h`
-3. REST endpoints:
-   - `GET /` — main settings page
-   - `GET /api/status` — JSON with live sensor data + mode
-   - `POST /api/settings` — save settings to NVS
-   - `GET /api/settings` — read current settings
-4. Load settings from NVS on boot, apply before WiFi init
-5. WebServer runs on port 80 in both modes
-
-### Resolves Known Issues
+### Resolved Known Issues
 - Disabling Ownship Report in Companion Mode → no more GPS conflict
 - Disabling ForeFlight ID in Companion Mode → no more name flicker
 - Baro will work when Ownship is sole source (Stratux Ownship disabled)
 
 ---
 
-## Project v0.4 — Stratux BNO086 Integration (Go Driver)
+## v0.4 — Per-Sensor Enable/Disable Config (completed)
+
+**Goal**: Each sensor (BNO086, BMP390, GPS) can be individually enabled/disabled
+via WebUI. Disabled or failed sensors no longer block boot.
+
+### Changes
+- **Config flags**: `enableBNO086`, `enableBMP390`, `enableGPS` in `Config` struct,
+  persisted in NVS
+- **Graceful boot**: Sensor init failures log a warning and continue instead of
+  halting with `while(true)`
+- **Runtime guards**: All sensor reads, GDL90 fields, and debug output are
+  guarded by `bno086ok` / `bmp390ok` / `config.enableGPS` flags
+- **WebUI**: Three new toggles under "Sensor Options" section
+- **Status endpoint**: New `gpsEnabled` field; `bno086ok` and `bmp390ok` reflect
+  actual init success (not just watchdog state)
+- **Config load moved before sensor init** so enable flags are available at boot
+
+### Files Changed
+- `config.h` — new fields, NVS load/save keys (`enBNO086`, `enBMP390`, `enGPS`)
+- `esp32-ahrs-gdl90.ino` — conditional init, runtime guards, reordered setup()
+- `webui.h` — new toggle controls, updated JS for load/save/status
+
+---
+
+## Project v0.5 — Stratux BNO086 Integration (Go Driver)
 
 **Goal**: Integrate BNO086 directly into Stratux as a native AHRS sensor,
 replacing the ICM-20948 software Kalman filter with BNO086 hardware fusion.
@@ -121,7 +130,7 @@ in the `lordvampire/stratux` fork on GitHub:
 - The ideal approach: bypass Kalman filter entirely for BNO086, use its
   hardware-fused quaternion directly as the attitude output
 
-### Potential v0.4 plan:
+### Potential v0.5 plan:
 1. Review existing code in `lordvampire/stratux` fork
 2. Test on Raspberry Pi with BNO086 connected via Qwiic/I2C
 3. Option A: Use existing parallel approach (already coded)
@@ -140,7 +149,7 @@ in the `lordvampire/stratux` fork on GitHub:
 
 ## Reference: Sensor Comparison
 
-| Sensor | Stratux (stock) | ESP32 AHRS (this project) | Stratux + BNO086 (v0.4) |
+| Sensor | Stratux (stock) | ESP32 AHRS (this project) | Stratux + BNO086 (v0.5) |
 |--------|-----------------|---------------------------|-------------------------|
 | IMU | ICM-20948 (SW Kalman) | BNO086 (HW fusion) | BNO086 (HW fusion) |
 | Baro | BMP280 (±0.12 hPa) | BMP390 (±0.03 hPa) | BMP280 or BMP390 |
