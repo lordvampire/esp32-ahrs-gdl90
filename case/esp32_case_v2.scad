@@ -14,11 +14,14 @@
 // =========================================================
 
 // ── Render selection ─────────────────────────────────────
-// Uncomment ONE line:
-view_side_by_side();
-//view_assembled();
-//base();
-//lid();
+// Set via command line: openscad -D 'part="base"' ...
+// Values: "both" (default), "assembled", "base", "lid"
+part = "both";
+
+if (part == "base")      base();
+if (part == "lid")       lid();
+if (part == "assembled") view_assembled();
+if (part == "both")      view_side_by_side();
 
 // ── Board dimensions ─────────────────────────────────────
 
