@@ -123,7 +123,124 @@ Lid plate     14.0 – 15.6 mm
 
 ---
 
-## Project v0.5 — Stratux BNO086 Integration (Go Driver)
+## v0.5 — BNO086 Calibration & Sensor Fusion Optimization (planned)
+
+**Goal**: Proper BNO086 calibration with persistence, optimized sensor fusion mode
+for cockpit use, and WebUI calibration interface with guided procedure.
+
+### Analysis Summary (from Datasheets)
+
+**Current gaps** in the ESP32 AHRS code:
+- Calibration data (DCD) is never saved → lost on every power cycle
+- Dynamic calibration runs for magnetometer during flight → heading jumps
+- Accuracy/status values from sensor reports are ignored
+- No user-facing calibration procedure
+
+**Key findings**:
+- I2C/Qwiic is sufficient (< 1% bus usage at 10Hz, even 50Hz OK)
+- Game Rotation Vector (0x08/0x29) is better for cockpit use than Rotation Vector (0x05/0x28)
+  because magnetometer is unreliable in aircraft magnetic environment
+- GPS heading already primary above 5kt → mag heading rarely needed
+- Pitch/roll accuracy: 1.0-2.5° (comparable to certified backup attitude indicators)
+- GRV heading drift: < 0.5°/min (acceptable for GPS-gap fallback)
+
+### Calibration Procedure (3 sensors)
+
+| Sensor | Procedure | Duration | Auto-calibrates? |
+|--------|-----------|----------|------------------|
+| Gyroscope | Set device on flat surface, hold still | 2-3 sec | Yes, whenever stationary |
+| Accelerometer | "Cube method" — 4-6 unique orientations, hold each ~1 sec | ~10 sec | Yes (dynamic cal) |
+| Magnetometer | Rotate ~180° and back in each axis (roll, pitch, yaw) | ~6 sec | Yes, but should disable in flight |
+
+Calibration status per sensor: 0=Unreliable, 1=Low, 2=Medium, 3=High.
+Target: all sensors at 2 or 3 before saving DCD.
+
+### Planned Changes
+
+#### HIGH Priority
+1. **DCD persistence** (`bno086.cpp`)
+   - Call `sh2_setDcdAutoSave(true)` at init
+   - Call `saveCalibration()` after successful calibration
+   - On `wasReset()`: reconfigure calibration settings (not just report)
+
+2. **Accuracy monitoring** (`bno086.cpp/h`)
+   - Read `getQuatAccuracy()` (0-3) on every update
+   - Expose via `getAccuracy()` getter
+   - Add to `/api/status` JSON response
+   - Display on WebUI with color indicator
+
+3. **Dynamic calibration control** (`bno086.cpp`)
+   - Normal operation (flight): `setCalibrationConfig(SH2_CAL_ACCEL)` only
+   - Calibration mode (ground): `setCalibrationConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG)`
+   - Default (mag enabled) causes heading jumps in flight — must fix
+
+4. **WebUI calibration page** (`webui.h`)
+   - "Calibrate" button starts calibration mode
+   - Step-by-step guide: Gyro → Accel → Mag
+   - Live status display (0-3) for each sensor with color (red/yellow/green)
+   - "Save" button calls `saveCalibration()` when all sensors at ≥2
+   - "Cancel" restores normal (flight) calibration config
+
+#### MEDIUM Priority
+5. **Switch to ARVR Stabilized Game Rotation Vector (0x29)**
+   - No magnetometer → no cockpit magnetic interference
+   - Pitch/roll identical, heading drifts slowly
+   - GPS heading is primary anyway
+   - Fallback: `enableARVRStabilizedGameRotationVector(interval)`
+
+6. **Increase report rate** to 50Hz
+   - `BNO086_REPORT_INTERVAL_MS` from 100 → 20
+   - Fresher data for 5Hz ForeFlight output, negligible I2C cost
+
+7. **Magnetic Field report** (`0x03`) at 2Hz
+   - Monitor mag calibration status independently
+   - Essential during ground calibration to show progress
+
+#### LOW Priority
+8. Stability Classifier (`0x13`) at 1Hz — detect stationary for auto-DCD-save
+9. Z-axis tare function via WebUI for heading alignment
+10. Linear Acceleration report for G-load display
+11. Reset reason logging after watchdog recovery
+12. System Orientation FRS record instead of `invertRoll` flag
+
+### Sensor Fusion Mode Comparison
+
+| Aspect | Current: ARVR Stab. RV (0x28) | Proposed: ARVR Stab. GRV (0x29) |
+|--------|-------------------------------|----------------------------------|
+| Pitch/Roll accuracy | 1.5-2.5° | 1.0-2.5° (slightly better) |
+| Heading source | Magnetometer (noisy in cockpit) | Gyro-only (drifts, but clean) |
+| Cockpit interference | Affected by avionics/engine | Immune |
+| Calibration needed | Accel + Gyro + Mag | Accel + Gyro only |
+| GPS heading fallback | Redundant (both available) | Sufficient (GPS primary) |
+
+### Files to Change
+- `bno086.h` — report rate, accuracy getter, calibration mode flag
+- `bno086.cpp` — DCD save, calibration config, accuracy reading, optional GRV switch
+- `webui.h` — calibration page with guided procedure and live status
+- `esp32-ahrs-gdl90.ino` — expose accuracy in status JSON, calibration API endpoints
+- `config.h` — (optional) persist sensor fusion mode selection
+
+### BNO086 Accuracy Specifications
+
+| Parameter | Value |
+|-----------|-------|
+| Pitch/Roll static | 1.0° (GRV) / 1.5° (RV) |
+| Pitch/Roll dynamic | 2.5° |
+| Heading static (RV with mag) | 2.0° |
+| Heading drift (GRV, no mag) | < 0.5°/min typical |
+| Power-on to first output | ~200ms |
+| Fusion convergence after reset | 2-3 seconds |
+
+### Height Stack Clearance (BNO086 Qwiic ↔ ESP32)
+```
+BNO086 Qwiic connector hangs at  8.9 mm
+ESP32 tallest component at        7.6 mm
+Clearance:                        1.3 mm (Qwiic cable ~1mm flat → OK)
+```
+
+---
+
+## Stratux BNO086 Integration (separate project, Go Driver)
 
 **Goal**: Integrate BNO086 directly into Stratux as a native AHRS sensor,
 replacing the ICM-20948 software Kalman filter with BNO086 hardware fusion.
