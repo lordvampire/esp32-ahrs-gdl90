@@ -77,6 +77,52 @@ via WebUI. Disabled or failed sensors no longer block boot.
 
 ---
 
+## Case v2 — 3D Printed Enclosure (completed)
+
+Parametric OpenSCAD case for ESP32 + BNO086 + BMP390 stack.
+
+**File**: `case/esp32_case_v2.scad`
+
+### Dimensions
+- **Outer**: 62.22 × 30.66 × 15.6 mm (box_h = floor 1.6 + inner 14.0)
+- **Cavity**: 59.02 × 27.46 × 14.0 mm (asymmetric width, +4mm connector side)
+- **inner_h = 14mm**: Fits two stacked boards (ESP32 in base, BNO086+BMP390 on lid)
+
+### Base
+- Rounded-corner shell with 4 screw bosses (M2.5, Feather/Thing Plus hole pattern)
+- USB-C closed opening (10 × 7 mm, not open to top)
+- Qwiic + LiPo cable slots through connector-side wall
+- Wave-shaped cooling vents through floor (shortened to clear bosses)
+
+### Lid
+- Snap-fit lip (2mm depth, 0.2mm clearance)
+- **BNO086** (SparkFun SEN-22857, 30.48 × 25.4 mm): 2× M2 screw bosses, 24mm spacing along X, anti-rotation support on far Y edge
+- **BMP390** (Adafruit 4816 STEMMA QT, 17.78 × 25.4 mm rotated): 2× M2 screw bosses, 20mm spacing along Y, anti-rotation support on far X edge
+- 8mm between nearest BNO086 and BMP390 holes
+- Both sensors at 1.5mm standoff height (clears backside SMD components)
+- Part selector via `-D 'part="base|lid|assembled|both"'`
+
+### STL Export
+```bash
+openscad -D 'part="base"' -o case/esp32_case_v2_base.stl case/esp32_case_v2.scad
+openscad -D 'part="lid"'  -o case/esp32_case_v2_lid.stl  case/esp32_case_v2.scad
+```
+
+### Height Stack (assembled, from bottom)
+```
+Floor          0.0 – 1.6 mm
+ESP32 bosses   1.6 – 3.6 mm  (ledge_h = 2.0)
+ESP32 PCB      3.6 – 5.2 mm
+ESP32 tallest  5.2 – 7.6 mm
+  ↕ 1.3 mm clearance (Qwiic cable)
+BNO086 Qwiic   8.9 mm
+BNO086 PCB    10.9 – 12.5 mm
+Standoffs     12.5 – 14.0 mm
+Lid plate     14.0 – 15.6 mm
+```
+
+---
+
 ## Project v0.5 — Stratux BNO086 Integration (Go Driver)
 
 **Goal**: Integrate BNO086 directly into Stratux as a native AHRS sensor,
