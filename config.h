@@ -29,6 +29,7 @@ struct Config {
     bool enableBNO086;   // enable BNO086 IMU init
     bool enableBMP390;   // enable BMP390 baro init
     bool enableGPS;      // enable GPS init
+    bool useGameRV;      // true = Game Rotation Vector (no mag), false = standard RV
 };
 
 // ---- NVS namespace --------------------------------------------------------
@@ -53,6 +54,7 @@ inline void defaultConfig(Config &cfg) {
     cfg.enableBNO086   = true;
     cfg.enableBMP390   = true;
     cfg.enableGPS      = true;
+    cfg.useGameRV      = true;   // Game RV: immune to cockpit magnetic interference
 }
 
 // ---- Load from NVS (fills defaults first, then overwrites with stored) -----
@@ -86,6 +88,7 @@ inline void loadConfig(Config &cfg) {
     cfg.enableBNO086   = prefs.getBool("enBNO086",       cfg.enableBNO086);
     cfg.enableBMP390   = prefs.getBool("enBMP390",       cfg.enableBMP390);
     cfg.enableGPS      = prefs.getBool("enGPS",          cfg.enableGPS);
+    cfg.useGameRV      = prefs.getBool("useGameRV",       cfg.useGameRV);
 
     prefs.end();
 }
@@ -112,6 +115,7 @@ inline void saveConfig(const Config &cfg) {
     prefs.putBool("enBNO086",       cfg.enableBNO086);
     prefs.putBool("enBMP390",       cfg.enableBMP390);
     prefs.putBool("enGPS",          cfg.enableGPS);
+    prefs.putBool("useGameRV",      cfg.useGameRV);
 
     prefs.end();
 }

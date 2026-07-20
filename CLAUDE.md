@@ -1,12 +1,15 @@
 # ESP32 AHRS GDL90 — Project Notes
 
-## Current State (v0.4)
+## Current State (v0.5)
 
 Working ForeFlight-compatible AHRS with dual-mode operation:
 - **Standalone Mode**: Own WiFi AP, full GDL90 output
 - **Companion Mode**: Auto-joins Stratux WiFi, broadcasts on Stratux subnet
 - **Web Configuration**: Browser-based settings via `http://192.168.10.1`
 - **Per-Sensor Config**: BNO086, BMP390 and GPS individually enable/disable via WebUI, persisted in NVS
+- **BNO086 Calibration**: DCD persistence, accuracy monitoring, guided calibration UI
+- **Sensor Fusion**: Configurable ARVR Stabilized Game RV (default) or standard RV, 50Hz report rate
+- **ESP32-S3**: Migrated to SparkFun Thing Plus ESP32-S3 (I2C on GPIO 8/9)
 
 ### Known Issues (Companion Mode)
 1. **Ownship conflict**: When Stratux GPS is enabled, both devices send
@@ -19,18 +22,29 @@ Working ForeFlight-compatible AHRS with dual-mode operation:
    everything works correctly
 
 ### Hardware
-- ESP32-WROOM-32D (not NodeMCU — board type: `esp32:esp32:esp32`)
+- SparkFun Thing Plus ESP32-S3 (WRL-24408, board type: `esp32:esp32:esp32s3`)
 - BNO086 I2C 0x4B (SparkFun Qwiic)
 - BMP390 I2C 0x77
 - u-blox GPS UART2 (GPIO16/17, 9600 baud)
+- I2C SDA: GPIO 8, SCL: GPIO 9
 
 ### Build Command
 ```bash
 flatpak run cc.arduino.arduinoide --upload \
-  --board esp32:esp32:esp32:UploadSpeed=921600 \
-  --port /dev/ttyUSB0 \
+  --board esp32:esp32:esp32s3:UploadSpeed=921600,CDCOnBoot=1 \
+  --port /dev/ttyACM0 \
   esp32-ahrs-gdl90.ino
 ```
+
+### REST Endpoints
+- `GET /` — main settings page
+- `GET /api/status` — JSON with live sensor data, accuracy, stability, calibration state
+- `GET /api/settings` — read current settings
+- `POST /api/settings` — save settings to NVS
+- `POST /api/reboot` — reboot device
+- `POST /api/calibration/start` — enter calibration mode (accel+gyro+mag)
+- `POST /api/calibration/save` — save DCD to flash, return to flight mode
+- `POST /api/calibration/cancel` — cancel calibration, return to flight mode
 
 ---
 
@@ -123,26 +137,47 @@ Lid plate     14.0 – 15.6 mm
 
 ---
 
-## v0.5 — BNO086 Calibration & Sensor Fusion Optimization (planned)
+## v0.5 — BNO086 Calibration & Sensor Fusion + ESP32-S3 Migration (completed)
 
-**Goal**: Proper BNO086 calibration with persistence, optimized sensor fusion mode
-for cockpit use, and WebUI calibration interface with guided procedure.
+**Goal**: Proper BNO086 calibration with DCD persistence, optimized sensor fusion mode
+for cockpit use, WebUI calibration interface, and migration to ESP32-S3.
 
-### Analysis Summary (from Datasheets)
+### Changes
 
-**Current gaps** in the ESP32 AHRS code:
-- Calibration data (DCD) is never saved → lost on every power cycle
-- Dynamic calibration runs for magnetometer during flight → heading jumps
-- Accuracy/status values from sensor reports are ignored
-- No user-facing calibration procedure
+#### ESP32-S3 Migration
+- I2C pins changed: SDA 21→8, SCL 22→9 (SparkFun Thing Plus ESP32-S3)
+- Hardware comment updated
+- GPS pins (GPIO 16/17) unchanged
 
-**Key findings**:
-- I2C/Qwiic is sufficient (< 1% bus usage at 10Hz, even 50Hz OK)
-- Game Rotation Vector (0x08/0x29) is better for cockpit use than Rotation Vector (0x05/0x28)
-  because magnetometer is unreliable in aircraft magnetic environment
-- GPS heading already primary above 5kt → mag heading rarely needed
-- Pitch/roll accuracy: 1.0-2.5° (comparable to certified backup attitude indicators)
-- GRV heading drift: < 0.5°/min (acceptable for GPS-gap fallback)
+#### BNO086 Calibration & Sensor Fusion
+- **DCD persistence**: `saveDCD()` saves calibration data to BNO086 flash via `saveCalibration()`
+- **Flight mode**: Default calibration config is `SH2_CAL_ACCEL` only (no mag dynamic cal during flight)
+- **Calibration mode**: `startCalibration()` enables accel+gyro+mag dynamic cal + 2Hz mag report
+- **Accuracy monitoring**: `getAccuracy()` (quaternion 0-3), `getMagAccuracy()` (mag field 0-3)
+- **Stability classifier**: `getStability()` at 1Hz (0=unknown, 1=table, 2=stationary, 3=stable, 4=motion)
+- **Game Rotation Vector**: Default sensor fusion mode switched to ARVR Stabilized GRV (no magnetometer, immune to cockpit magnetic interference). Configurable via `useGameRV` setting.
+- **50Hz report rate**: `BNO086_REPORT_INTERVAL_MS` changed from 100ms (10Hz) to 20ms (50Hz)
+- **Reset recovery**: `wasReset()` handler restores full calibration config, reports, and stability classifier
+
+#### WebUI
+- New "BNO086 Calibration" card with live accuracy display (color-coded: red/orange/yellow/green)
+- Stability classifier display
+- Guided calibration procedure (Gyro → Accel → Mag) with step completion checkmarks
+- Calibrate/Save/Cancel buttons with dynamic visibility
+- "Game Rotation Vector (no Mag)" checkbox in Sensor Options
+
+#### API
+- Status JSON extended: `imuAccuracy`, `magAccuracy`, `stability`, `calibrating`, `useGameRV`
+- Settings JSON extended: `useGameRV`
+- New endpoints: `/api/calibration/start`, `/api/calibration/save`, `/api/calibration/cancel`
+- Status JSON buffer increased from 448 to 600 bytes
+
+### Files Changed
+- `config.h` — `useGameRV` field in Config struct, NVS load/save
+- `bno086.h` — new methods, members, 20ms report interval
+- `bno086.cpp` — complete rewrite: calibration control, GRV/RV selection, accuracy/stability/mag tracking
+- `esp32-ahrs-gdl90.ino` — I2C pins, hardware comment, status JSON, calibration endpoints, settings
+- `webui.h` — calibration UI card, Game RV toggle, accuracy display JS
 
 ### Calibration Procedure (3 sensors)
 
@@ -150,75 +185,20 @@ for cockpit use, and WebUI calibration interface with guided procedure.
 |--------|-----------|----------|------------------|
 | Gyroscope | Set device on flat surface, hold still | 2-3 sec | Yes, whenever stationary |
 | Accelerometer | "Cube method" — 4-6 unique orientations, hold each ~1 sec | ~10 sec | Yes (dynamic cal) |
-| Magnetometer | Rotate ~180° and back in each axis (roll, pitch, yaw) | ~6 sec | Yes, but should disable in flight |
+| Magnetometer | Rotate ~180° and back in each axis (roll, pitch, yaw) | ~6 sec | Yes, but disabled in flight mode |
 
 Calibration status per sensor: 0=Unreliable, 1=Low, 2=Medium, 3=High.
 Target: all sensors at 2 or 3 before saving DCD.
 
-### Planned Changes
-
-#### HIGH Priority
-1. **DCD persistence** (`bno086.cpp`)
-   - Call `sh2_setDcdAutoSave(true)` at init
-   - Call `saveCalibration()` after successful calibration
-   - On `wasReset()`: reconfigure calibration settings (not just report)
-
-2. **Accuracy monitoring** (`bno086.cpp/h`)
-   - Read `getQuatAccuracy()` (0-3) on every update
-   - Expose via `getAccuracy()` getter
-   - Add to `/api/status` JSON response
-   - Display on WebUI with color indicator
-
-3. **Dynamic calibration control** (`bno086.cpp`)
-   - Normal operation (flight): `setCalibrationConfig(SH2_CAL_ACCEL)` only
-   - Calibration mode (ground): `setCalibrationConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG)`
-   - Default (mag enabled) causes heading jumps in flight — must fix
-
-4. **WebUI calibration page** (`webui.h`)
-   - "Calibrate" button starts calibration mode
-   - Step-by-step guide: Gyro → Accel → Mag
-   - Live status display (0-3) for each sensor with color (red/yellow/green)
-   - "Save" button calls `saveCalibration()` when all sensors at ≥2
-   - "Cancel" restores normal (flight) calibration config
-
-#### MEDIUM Priority
-5. **Switch to ARVR Stabilized Game Rotation Vector (0x29)**
-   - No magnetometer → no cockpit magnetic interference
-   - Pitch/roll identical, heading drifts slowly
-   - GPS heading is primary anyway
-   - Fallback: `enableARVRStabilizedGameRotationVector(interval)`
-
-6. **Increase report rate** to 50Hz
-   - `BNO086_REPORT_INTERVAL_MS` from 100 → 20
-   - Fresher data for 5Hz ForeFlight output, negligible I2C cost
-
-7. **Magnetic Field report** (`0x03`) at 2Hz
-   - Monitor mag calibration status independently
-   - Essential during ground calibration to show progress
-
-#### LOW Priority
-8. Stability Classifier (`0x13`) at 1Hz — detect stationary for auto-DCD-save
-9. Z-axis tare function via WebUI for heading alignment
-10. Linear Acceleration report for G-load display
-11. Reset reason logging after watchdog recovery
-12. System Orientation FRS record instead of `invertRoll` flag
-
 ### Sensor Fusion Mode Comparison
 
-| Aspect | Current: ARVR Stab. RV (0x28) | Proposed: ARVR Stab. GRV (0x29) |
+| Aspect | ARVR Stab. RV (0x28) | ARVR Stab. GRV (0x29, default) |
 |--------|-------------------------------|----------------------------------|
 | Pitch/Roll accuracy | 1.5-2.5° | 1.0-2.5° (slightly better) |
 | Heading source | Magnetometer (noisy in cockpit) | Gyro-only (drifts, but clean) |
 | Cockpit interference | Affected by avionics/engine | Immune |
 | Calibration needed | Accel + Gyro + Mag | Accel + Gyro only |
 | GPS heading fallback | Redundant (both available) | Sufficient (GPS primary) |
-
-### Files to Change
-- `bno086.h` — report rate, accuracy getter, calibration mode flag
-- `bno086.cpp` — DCD save, calibration config, accuracy reading, optional GRV switch
-- `webui.h` — calibration page with guided procedure and live status
-- `esp32-ahrs-gdl90.ino` — expose accuracy in status JSON, calibration API endpoints
-- `config.h` — (optional) persist sensor fusion mode selection
 
 ### BNO086 Accuracy Specifications
 
@@ -231,12 +211,44 @@ Target: all sensors at 2 or 3 before saving DCD.
 | Power-on to first output | ~200ms |
 | Fusion convergence after reset | 2-3 seconds |
 
-### Height Stack Clearance (BNO086 Qwiic ↔ ESP32)
-```
-BNO086 Qwiic connector hangs at  8.9 mm
-ESP32 tallest component at        7.6 mm
-Clearance:                        1.3 mm (Qwiic cable ~1mm flat → OK)
-```
+### Remaining TODO (LOW priority)
+- Z-axis tare function via WebUI for heading alignment
+- Linear Acceleration report for G-load display
+- Reset reason logging after watchdog recovery
+- System Orientation FRS record instead of `invertRoll` flag
+
+---
+
+## ESP32-S3 Migration (completed, part of v0.5)
+
+Migrated from ESP32-WROOM-32D to SparkFun Thing Plus ESP32-S3 (WRL-24408).
+
+### Why ESP32-S3
+- Native USB-C (no FTDI/CP2102 needed)
+- More GPIO, more RAM
+- SparkFun Thing Plus form factor with Qwiic connector built-in
+- Same ESP32 Arduino core, minimal code changes
+
+### Code Changes Applied
+
+| Pin | ESP32-WROOM-32D | SparkFun Thing Plus ESP32-S3 |
+|-----|-----------------|------------------------------|
+| I2C SDA | GPIO 21 | GPIO 8 |
+| I2C SCL | GPIO 22 | GPIO 9 |
+| GPS RX | GPIO 16 | GPIO 16 (unchanged) |
+| GPS TX | GPIO 17 | GPIO 17 (unchanged) |
+
+### USB CDC Notes
+- ESP32-S3 uses native USB CDC for serial — no external USB-serial chip
+- `CDCOnBoot=1` must be set in board options
+- `Serial.begin()` works the same, but boot messages may need a short delay
+  for USB CDC enumeration (add `while(!Serial) { delay(10); }` if needed)
+- WiFi and UDP remain identical — no changes to GDL90 output
+
+### Case Compatibility
+- SparkFun Thing Plus ESP32-S3 has the same Feather/Thing Plus form factor
+- Mounting holes match existing case screw bosses (M2.5)
+- USB-C port position may differ slightly — verify with actual board
 
 ---
 

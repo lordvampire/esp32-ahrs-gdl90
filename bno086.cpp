@@ -5,7 +5,13 @@ BNO086Handler::BNO086Handler()
     : _wire(nullptr),
       _roll(0.0f), _pitch(0.0f), _yaw(0.0f),
       _qi(0.0f), _qj(0.0f), _qk(0.0f), _qr(1.0f),
-      _lastUpdateMs(0) {}
+      _lastUpdateMs(0),
+      _accuracy(0), _magAccuracy(0), _stability(0),
+      _calibrating(false), _useGameRV(true) {}
+
+void BNO086Handler::setUseGameRV(bool useGameRV) {
+    _useGameRV = useGameRV;
+}
 
 bool BNO086Handler::begin(TwoWire &wire) {
     _wire = &wire;
@@ -17,7 +23,14 @@ bool BNO086Handler::begin(TwoWire &wire) {
     for (int attempt = 0; attempt < 5; attempt++) {
         if (_imu.begin(BNO086_ADDR, *_wire)) {
             delay(500);
+
+            // Flight mode: only accelerometer dynamic calibration
+            _imu.setCalibrationConfig(SH2_CAL_ACCEL);
+
             if (enableReport()) {
+                // Stability classifier at 1 Hz
+                _imu.enableStabilityClassifier(1000);
+
                 _lastUpdateMs = millis();
                 return true;
             }
@@ -29,12 +42,11 @@ bool BNO086Handler::begin(TwoWire &wire) {
 }
 
 bool BNO086Handler::enableReport() {
-    // ARVR Stabilized Rotation Vector: best stability for aircraft AHRS.
-    // Uses accelerometer + gyroscope + magnetometer, game-rotation stabilized.
-    if (!_imu.enableARVRStabilizedRotationVector(BNO086_REPORT_INTERVAL_MS)) {
-        return false;
+    if (_useGameRV) {
+        return _imu.enableARVRStabilizedGameRotationVector(BNO086_REPORT_INTERVAL_MS);
+    } else {
+        return _imu.enableARVRStabilizedRotationVector(BNO086_REPORT_INTERVAL_MS);
     }
-    return true;
 }
 
 bool BNO086Handler::reinit() {
@@ -45,7 +57,17 @@ bool BNO086Handler::reinit() {
     for (int attempt = 0; attempt < 3; attempt++) {
         if (_imu.begin(BNO086_ADDR, *_wire)) {
             delay(500);
+
+            // Restore calibration config
+            if (_calibrating) {
+                _imu.setCalibrationConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
+            } else {
+                _imu.setCalibrationConfig(SH2_CAL_ACCEL);
+            }
+
             if (enableReport()) {
+                _imu.enableStabilityClassifier(1000);
+                if (_calibrating) _imu.enableMagnetometer(500);
                 _lastUpdateMs = millis();
                 return true;
             }
@@ -57,23 +79,44 @@ bool BNO086Handler::reinit() {
 
 bool BNO086Handler::update() {
     if (_imu.wasReset()) {
-        // After a reset, re-enable our reports.
+        // Re-configure everything after unexpected reset
+        if (_calibrating) {
+            _imu.setCalibrationConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
+        } else {
+            _imu.setCalibrationConfig(SH2_CAL_ACCEL);
+        }
         enableReport();
+        _imu.enableStabilityClassifier(1000);
+        if (_calibrating) _imu.enableMagnetometer(500);
     }
 
-    if (!_imu.getSensorEvent()) {
-        return false;
-    }
+    if (!_imu.getSensorEvent()) return false;
 
-    if (_imu.getSensorEventID() == SENSOR_REPORTID_AR_VR_STABILIZED_ROTATION_VECTOR) {
+    uint8_t id = _imu.getSensorEventID();
+
+    // Rotation Vector (GRV or RV)
+    if (id == SENSOR_REPORTID_AR_VR_STABILIZED_GAME_ROTATION_VECTOR ||
+        id == SENSOR_REPORTID_AR_VR_STABILIZED_ROTATION_VECTOR) {
         _qi = _imu.getQuatI();
         _qj = _imu.getQuatJ();
         _qk = _imu.getQuatK();
         _qr = _imu.getQuatReal();
-
+        _accuracy = _imu.getQuatAccuracy();
         quaternionToEuler(_qi, _qj, _qk, _qr);
         _lastUpdateMs = millis();
         return true;
+    }
+
+    // Magnetic Field — extract accuracy only
+    if (id == SENSOR_REPORTID_MAGNETIC_FIELD) {
+        _magAccuracy = _imu.getMagAccuracy();
+        return false;  // no new attitude update
+    }
+
+    // Stability Classifier
+    if (id == SENSOR_REPORTID_STABILITY_CLASSIFIER) {
+        _stability = _imu.getStabilityClassifier();
+        return false;
     }
 
     return false;
@@ -87,9 +130,7 @@ bool BNO086Handler::update() {
 //   Yaw   = rotation about Z (down),    0-360 degrees
 // --------------------------------------------------------------------------
 void BNO086Handler::quaternionToEuler(float qi, float qj, float qk, float qr) {
-    // Roll (bank angle) — raw value from quaternion.
-    // Sign inversion for aircraft convention (mounting-dependent) is
-    // handled by config.invertRoll in the main sketch.
+    // Roll (bank angle)
     float sinr_cosp = 2.0f * (qr * qi + qj * qk);
     float cosr_cosp = 1.0f - 2.0f * (qi * qi + qj * qj);
     _roll = atan2f(sinr_cosp, cosr_cosp) * (180.0f / M_PI);
@@ -111,6 +152,27 @@ void BNO086Handler::quaternionToEuler(float qi, float qj, float qk, float qr) {
     if (_yaw < 0.0f) _yaw += 360.0f;
 }
 
+// --------------------------------------------------------------------------
+// Calibration control
+// --------------------------------------------------------------------------
+void BNO086Handler::startCalibration() {
+    _calibrating = true;
+    _imu.setCalibrationConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
+    _imu.enableMagnetometer(500);  // 2 Hz for live accuracy status
+}
+
+void BNO086Handler::stopCalibration() {
+    _calibrating = false;
+    _imu.setCalibrationConfig(SH2_CAL_ACCEL);  // flight mode
+}
+
+bool BNO086Handler::saveDCD() {
+    return _imu.saveCalibration();
+}
+
+// --------------------------------------------------------------------------
+// Getters
+// --------------------------------------------------------------------------
 float BNO086Handler::getRoll() const { return _roll; }
 float BNO086Handler::getPitch() const { return _pitch; }
 float BNO086Handler::getYaw() const { return _yaw; }
@@ -125,3 +187,8 @@ unsigned long BNO086Handler::getLastUpdateMs() const { return _lastUpdateMs; }
 bool BNO086Handler::isWatchdogExpired() const {
     return (millis() - _lastUpdateMs) > BNO086_WATCHDOG_MS;
 }
+
+uint8_t BNO086Handler::getAccuracy() const { return _accuracy; }
+uint8_t BNO086Handler::getMagAccuracy() const { return _magAccuracy; }
+uint8_t BNO086Handler::getStability() const { return _stability; }
+bool BNO086Handler::isCalibrating() const { return _calibrating; }

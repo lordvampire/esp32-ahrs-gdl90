@@ -38,6 +38,7 @@ button{flex:1;padding:10px;border:none;border-radius:6px;font-size:14px;font-wei
 #msg{text-align:center;margin-top:8px;font-size:13px;min-height:18px}
 .sensors{display:flex;gap:12px;margin-top:4px}
 .sensor{padding:2px 6px;border-radius:3px;font-size:12px;font-weight:bold}
+.acc-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
 </style>
 </head>
 <body>
@@ -58,6 +59,34 @@ button{flex:1;padding:10px;border:none;border-radius:6px;font-size:14px;font-wei
 <div class="row"><span class="label">Clients</span><span class="val" id="sClients">---</span></div>
 <div class="row"><span class="label">Uptime</span><span class="val" id="sUptime">---</span></div>
 <div class="sensors" id="sSensors"></div>
+</div>
+
+<!-- BNO086 Calibration Section -->
+<div class="card">
+<h2>BNO086 Calibration</h2>
+<div id="calSection">
+  <div class="row"><span class="label">IMU Accuracy</span>
+    <span class="val" id="sAccuracy">---</span></div>
+  <div class="row"><span class="label">Mag Accuracy</span>
+    <span class="val" id="sMagAcc">---</span></div>
+  <div class="row"><span class="label">Stability</span>
+    <span class="val" id="sStability">---</span></div>
+  <div class="row"><span class="label">Status</span>
+    <span class="val" id="sCalStatus">Flight Mode</span></div>
+
+  <div id="calGuide" style="display:none;margin:8px 0;padding:8px;background:#0f3460;border-radius:4px;font-size:12px">
+    <div id="calStep"></div>
+  </div>
+
+  <div class="btn-row" style="margin-top:8px">
+    <button id="btnCalStart" onclick="calStart()"
+      style="background:#e65100;color:#fff">Calibrate</button>
+    <button id="btnCalSave" onclick="calSave()" style="display:none;
+      background:#1b5e20;color:#fff">Save</button>
+    <button id="btnCalCancel" onclick="calCancel()" style="display:none;
+      background:#555;color:#fff">Cancel</button>
+  </div>
+</div>
 </div>
 
 <!-- Settings Section -->
@@ -101,6 +130,7 @@ button{flex:1;padding:10px;border:none;border-radius:6px;font-size:14px;font-wei
 <label><span>BMP390 (Baro)</span><input type="checkbox" id="cfgBMP390"></label>
 <label><span>GPS</span><input type="checkbox" id="cfgGPSEn"></label>
 <label><span>Invert Roll</span><input type="checkbox" id="cfgInvertRoll"></label>
+<label><span>Game Rotation Vector (no Mag)</span><input type="checkbox" id="cfgGameRV"></label>
 
 <div class="btn-row">
 <button id="btnSave" onclick="saveSettings()">Save</button>
@@ -115,6 +145,18 @@ function fmtTime(ms){
   var s=Math.floor(ms/1000),m=Math.floor(s/60),h=Math.floor(m/60);
   return h+'h '+m%60+'m '+s%60+'s';
 }
+
+var accColors=['#ef5350','#ff9800','#ffeb3b','#66bb6a'];
+var accLabels=['Unreliable','Low','Medium','High'];
+var stabLabels=['Unknown','On Table','Stationary','Stable','Motion'];
+
+function accHTML(val){
+  var c=accColors[val]||'#555';
+  return '<span class="acc-dot" style="background:'+c+'"></span>'+
+    val+'/3 ('+( accLabels[val]||'?')+')';
+}
+
+var calActive=false;
 
 function updateStatus(){
   fetch('/api/status').then(function(r){return r.json()}).then(function(d){
@@ -135,6 +177,55 @@ function updateStatus(){
     sh+='<span class="sensor" style="background:'+(d.bmp390ok?'#1b5e20':'#b71c1c')+'">BMP390</span>';
     sh+='<span class="sensor" style="background:'+(d.gpsEnabled?(d.gpsFix?'#1b5e20':'#e65100'):'#555')+'">GPS</span>';
     $('sSensors').innerHTML=sh;
+
+    // Calibration status
+    $('sAccuracy').innerHTML=accHTML(d.imuAccuracy);
+    $('sMagAcc').innerHTML=accHTML(d.magAccuracy);
+    $('sStability').textContent=stabLabels[d.stability]||'Unknown';
+    $('sCalStatus').textContent=d.calibrating?'Calibrating...':'Flight Mode';
+    $('sCalStatus').style.color=d.calibrating?'#ff9800':'#66bb6a';
+
+    calActive=d.calibrating;
+    $('btnCalStart').style.display=calActive?'none':'block';
+    $('btnCalSave').style.display=calActive?'block':'none';
+    $('btnCalCancel').style.display=calActive?'block':'none';
+    $('calGuide').style.display=calActive?'block':'none';
+
+    if(calActive){
+      var steps='<div style="margin-bottom:4px;font-weight:bold;color:#81d4fa">Calibration Guide:</div>';
+      var gyroOk=d.imuAccuracy>=2;
+      var magOk=d.magAccuracy>=2;
+      steps+='<div style="color:'+(gyroOk?'#66bb6a':'#fff')+'">1. Gyro: Place device flat, hold still 3 sec '+(gyroOk?'\u2713':'\u2026')+'</div>';
+      steps+='<div style="color:'+(d.imuAccuracy>=2?'#66bb6a':'#fff')+'">2. Accel: Rotate to 4-6 orientations, hold each 1 sec '+(d.imuAccuracy>=2?'\u2713':'\u2026')+'</div>';
+      steps+='<div style="color:'+(magOk?'#66bb6a':'#fff')+'">3. Mag: Rotate ~180\u00B0 and back in each axis '+(magOk?'\u2713':'\u2026')+'</div>';
+      if(d.imuAccuracy>=2&&magOk){
+        steps+='<div style="color:#66bb6a;margin-top:4px;font-weight:bold">Ready to save!</div>';
+      }
+      $('calStep').innerHTML=steps;
+    }
+  }).catch(function(){});
+}
+
+function calStart(){
+  fetch('/api/calibration/start',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(d.ok) updateStatus();
+  }).catch(function(){});
+}
+
+function calSave(){
+  fetch('/api/calibration/save',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(d.ok){
+      $('calStep').innerHTML='<div style="color:#66bb6a;font-weight:bold">Calibration saved!</div>';
+      setTimeout(updateStatus,2000);
+    } else {
+      $('calStep').innerHTML='<div style="color:#ef5350">Save failed!</div>';
+    }
+  }).catch(function(){});
+}
+
+function calCancel(){
+  fetch('/api/calibration/cancel',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(d.ok) updateStatus();
   }).catch(function(){});
 }
 
@@ -154,6 +245,7 @@ function loadSettings(){
     $('cfgBMP390').checked=d.enableBMP390;
     $('cfgGPSEn').checked=d.enableGPS;
     $('cfgInvertRoll').checked=d.invertRoll;
+    $('cfgGameRV').checked=d.useGameRV;
   }).catch(function(){$('msg').textContent='Failed to load settings';});
 }
 
@@ -172,7 +264,8 @@ function saveSettings(){
     enableBNO086:$('cfgBNO086').checked,
     enableBMP390:$('cfgBMP390').checked,
     enableGPS:$('cfgGPSEn').checked,
-    invertRoll:$('cfgInvertRoll').checked
+    invertRoll:$('cfgInvertRoll').checked,
+    useGameRV:$('cfgGameRV').checked
   });
   fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:body})
     .then(function(r){return r.json()})

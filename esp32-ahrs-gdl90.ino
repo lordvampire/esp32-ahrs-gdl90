@@ -12,7 +12,7 @@
 // Port 4000:  GDL90 binary (Heartbeat, Ownship, GeoAlt, FF-ID, FF-AHRS)
 // Port 49002: ForeFlight text protocol (XGPS, XATT)
 //
-// Hardware: ESP32-WROOM-32D, BNO086 (I2C), BMP390 (I2C), u-blox GPS (UART2)
+// Hardware: SparkFun Thing Plus ESP32-S3, BNO086 (I2C), BMP390 (I2C), u-blox GPS (UART2)
 // ============================================================================
 
 #include <WiFi.h>
@@ -51,8 +51,8 @@ static const uint16_t GDL90_PORT  = 4000;
 static const uint16_t FF_SIM_PORT = 49002;
 
 // ---- I2C pins (Qwiic chain) -----------------------------------------------
-static const int SDA_PIN = 21;
-static const int SCL_PIN = 22;
+static const int SDA_PIN = 8;
+static const int SCL_PIN = 9;
 
 // ---- Timing ----------------------------------------------------------------
 static const unsigned long GDL90_INTERVAL_MS = 1000;  // 1 Hz
@@ -218,7 +218,7 @@ void handleGetStatus() {
         hdgSrc = "NONE";
     }
 
-    char json[448];
+    char json[600];
     snprintf(json, sizeof(json),
         "{\"mode\":\"%s\","
         "\"roll\":%.1f,\"pitch\":%.1f,\"heading\":%.1f,"
@@ -227,7 +227,10 @@ void handleGetStatus() {
         "\"gpsFix\":%s,\"gpsEnabled\":%s,\"satellites\":%u,"
         "\"wifiRSSI\":%d,\"clients\":%d,"
         "\"uptimeMs\":%lu,"
-        "\"bno086ok\":%s,\"bmp390ok\":%s}",
+        "\"bno086ok\":%s,\"bmp390ok\":%s,"
+        "\"imuAccuracy\":%u,\"magAccuracy\":%u,"
+        "\"stability\":%u,\"calibrating\":%s,"
+        "\"useGameRV\":%s}",
         opMode == MODE_COMPANION ? "COMPANION" : "STANDALONE",
         roll, pitch, heading,
         hdgSrc,
@@ -239,13 +242,18 @@ void handleGetStatus() {
         opMode == MODE_STANDALONE ? (int)WiFi.softAPgetStationNum() : 0,
         millis(),
         bno086ok ? "true" : "false",
-        bmp390ok ? "true" : "false");
+        bmp390ok ? "true" : "false",
+        bno086ok ? imu.getAccuracy() : 0,
+        bno086ok ? imu.getMagAccuracy() : 0,
+        bno086ok ? imu.getStability() : 0,
+        (bno086ok && imu.isCalibrating()) ? "true" : "false",
+        config.useGameRV ? "true" : "false");
 
     server.send(200, "application/json", json);
 }
 
 void handleGetSettings() {
-    char json[448];
+    char json[512];
     snprintf(json, sizeof(json),
         "{\"mode\":%u,"
         "\"apSSID\":\"%s\",\"apPassword\":\"%s\","
@@ -254,7 +262,8 @@ void handleGetSettings() {
         "\"sendHeartbeat\":%s,\"sendFFID\":%s,"
         "\"sendXGPS\":%s,\"sendXATT\":%s,"
         "\"invertRoll\":%s,"
-        "\"enableBNO086\":%s,\"enableBMP390\":%s,\"enableGPS\":%s}",
+        "\"enableBNO086\":%s,\"enableBMP390\":%s,\"enableGPS\":%s,"
+        "\"useGameRV\":%s}",
         config.mode,
         config.apSSID, config.apPassword,
         config.stratuxSSID,
@@ -267,7 +276,8 @@ void handleGetSettings() {
         config.invertRoll     ? "true" : "false",
         config.enableBNO086   ? "true" : "false",
         config.enableBMP390   ? "true" : "false",
-        config.enableGPS      ? "true" : "false");
+        config.enableGPS      ? "true" : "false",
+        config.useGameRV      ? "true" : "false");
 
     server.send(200, "application/json", json);
 }
@@ -329,6 +339,7 @@ void handlePostSettings() {
     v = jsonBool("enableBNO086");  if (v >= 0) config.enableBNO086   = v;
     v = jsonBool("enableBMP390");  if (v >= 0) config.enableBMP390   = v;
     v = jsonBool("enableGPS");     if (v >= 0) config.enableGPS      = v;
+    v = jsonBool("useGameRV");     if (v >= 0) config.useGameRV      = v;
 
     saveConfig(config);
 
@@ -339,6 +350,27 @@ void handleReboot() {
     server.send(200, "application/json", "{\"ok\":true}");
     delay(500);
     ESP.restart();
+}
+
+void handleCalStart() {
+    if (!bno086ok) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+    imu.startCalibration();
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleCalSave() {
+    if (!bno086ok) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+    bool ok = imu.saveDCD();
+    imu.stopCalibration();  // back to flight mode
+    char json[32];
+    snprintf(json, sizeof(json), "{\"ok\":%s}", ok ? "true" : "false");
+    server.send(200, "application/json", json);
+}
+
+void handleCalCancel() {
+    if (!bno086ok) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+    imu.stopCalibration();
+    server.send(200, "application/json", "{\"ok\":true}");
 }
 
 // ============================================================================
@@ -363,9 +395,12 @@ void setup() {
     // ---- BNO086 init -------------------------------------------------------
     if (config.enableBNO086) {
         Serial.print("Initializing BNO086... ");
+        imu.setUseGameRV(config.useGameRV);
         if (imu.begin(Wire)) {
             bno086ok = true;
-            Serial.println("OK");
+            Serial.print("OK (");
+            Serial.print(config.useGameRV ? "Game RV" : "Rotation Vector");
+            Serial.println(")");
         } else {
             Serial.println("FAILED — BNO086 not found. Continuing without IMU.");
         }
@@ -460,7 +495,10 @@ void setup() {
     server.on("/api/status",   HTTP_GET,  handleGetStatus);
     server.on("/api/settings", HTTP_GET,  handleGetSettings);
     server.on("/api/settings", HTTP_POST, handlePostSettings);
-    server.on("/api/reboot",   HTTP_POST, handleReboot);
+    server.on("/api/reboot",             HTTP_POST, handleReboot);
+    server.on("/api/calibration/start",  HTTP_POST, handleCalStart);
+    server.on("/api/calibration/save",   HTTP_POST, handleCalSave);
+    server.on("/api/calibration/cancel", HTTP_POST, handleCalCancel);
     server.begin();
     Serial.println("WebServer started on port 80");
 
