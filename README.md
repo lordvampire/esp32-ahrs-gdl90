@@ -1,6 +1,6 @@
 # ESP32 AHRS GDL90
 
-Open-source Aircraft Attitude and Heading Reference System (AHRS) for ESP32.
+Open-source Aircraft Attitude and Heading Reference System (AHRS) for ESP32-S3.
 Broadcasts GDL90 data over WiFi to **ForeFlight**, **Enroute** and other
 EFB apps that support the GDL90 protocol.
 
@@ -12,59 +12,77 @@ Supports two operating modes:
   and provides superior AHRS + barometric altitude alongside Stratux's ADS-B
   traffic reception.
 
+All settings are configurable via a built-in **Web UI** -- no reflashing
+required to change operating mode, message selection, sensor options or
+WiFi credentials.
+
 ## Features
 
 - **ForeFlight compatible** -- recognised as a connected device on the
   ForeFlight Devices page (uses the ForeFlight GDL90 Extended Specification)
 - **Dual-mode operation** -- auto-detects Stratux WiFi at boot; if found,
   joins as a companion device; otherwise creates its own AP
+- **Web Configuration UI** -- browser-based settings page with live sensor
+  status, BNO086 calibration interface, and per-message/per-sensor toggles
 - **Dual-port output** -- GDL90 binary on UDP 4000 + ForeFlight text protocol
   (XGPS/XATT) on UDP 49002
 - **AHRS at 5 Hz** -- ForeFlight binary AHRS (0x65/0x01) and XATT attitude
   updates every 200 ms for smooth synthetic vision
 - **Standard GDL90 at 1 Hz** -- Heartbeat, Ownship Report, Ownship Geometric
   Altitude and ForeFlight Device ID
-- **BNO086 hardware sensor fusion** -- ARVR Stabilized Rotation Vector for
-  accurate roll/pitch/heading without software filtering (significantly
-  better than Stratux's software-based ICM-20948 AHRS)
+- **BNO086 hardware sensor fusion** -- ARVR Stabilized Game Rotation Vector
+  at 50 Hz for accurate roll/pitch without magnetometer interference;
+  optional standard Rotation Vector mode with magnetic heading
+- **BNO086 calibration with DCD persistence** -- guided calibration procedure
+  via Web UI with live accuracy feedback; calibration data saved to BNO086
+  flash and restored across power cycles
 - **BMP390 barometric altitude** -- 4x more accurate than Stratux's BMP280
   (±0.03 hPa vs ±0.12 hPa relative accuracy)
 - **GPS position & track** -- u-blox NMEA parser with automatic heading source
   switching (GPS track above 5 kt, IMU yaw below)
-- **Watchdog recovery** -- automatic BNO086 re-initialisation on sensor timeout
+- **Per-sensor enable/disable** -- each sensor (BNO086, BMP390, GPS) can be
+  individually enabled or disabled via Web UI; failed sensors don't block boot
+- **Per-message toggles** -- each GDL90 message type can be enabled/disabled
+  independently (useful for Companion Mode conflict avoidance)
+- **Persistent configuration** -- all settings stored in ESP32 NVS flash;
+  settings are saved separately from the running config and applied on reboot
+- **Watchdog recovery** -- automatic BNO086 re-initialisation on sensor timeout;
+  disables IMU gracefully if recovery fails
 - **Auto-reconnect** -- in Companion Mode, automatically reconnects if Stratux
   WiFi is temporarily lost
 - **Up to 4 simultaneous clients** (Standalone Mode)
+- **3D-printable enclosure** -- parametric OpenSCAD case with mounting for
+  ESP32 + BNO086 + BMP390 stack (STL files included)
 
 ## Hardware
 
 | Component | Part | Interface | Address / Pins |
 |-----------|------|-----------|----------------|
-| MCU | ESP32-WROOM-32D (Xtensa LX6, 240 MHz) | -- | -- |
-| IMU | BNO086 (SparkFun Qwiic) | I2C | 0x4A, SDA=GPIO21, SCL=GPIO22 |
-| Barometer | BMP390 (Adafruit / SparkFun Qwiic) | I2C | 0x77, daisy-chained |
+| MCU | SparkFun Thing Plus ESP32-S3 (WRL-24408) | -- | -- |
+| IMU | BNO086 (SparkFun Qwiic) | I2C | 0x4B, SDA=GPIO8, SCL=GPIO9 |
+| Barometer | BMP390 (Adafruit STEMMA QT) | I2C | 0x76 (SDO low), daisy-chained |
 | GPS | u-blox module (SparkFun breakout) | UART2 | RX=GPIO16, TX=GPIO17, 9600 baud |
 
-Any ESP32 dev board with a WROOM-32 module should work (DevKitC, NodeMCU-32S,
-etc.). The BNO086 and BMP390 are connected via a Qwiic / I2C daisy chain.
+The BNO086 and BMP390 are connected via a Qwiic / STEMMA QT daisy chain on
+the I2C bus. The SparkFun Thing Plus ESP32-S3 has a built-in Qwiic connector.
 
 ## Wiring
 
 ```
-ESP32 GPIO21 (SDA) ──── Qwiic SDA ──── BNO086 SDA ──── BMP390 SDA
-ESP32 GPIO22 (SCL) ──── Qwiic SCL ──── BNO086 SCL ──── BMP390 SCL
-ESP32 3V3          ──── Qwiic 3V3 ──── BNO086 3V3 ──── BMP390 3V3
-ESP32 GND          ──── Qwiic GND ──── BNO086 GND ──── BMP390 GND
+ESP32-S3 GPIO8  (SDA) ──── Qwiic SDA ──── BNO086 SDA ──── BMP390 SDA
+ESP32-S3 GPIO9  (SCL) ──── Qwiic SCL ──── BNO086 SCL ──── BMP390 SCL
+ESP32-S3 3V3           ──── Qwiic 3V3 ──── BNO086 3V3 ──── BMP390 3V3
+ESP32-S3 GND           ──── Qwiic GND ──── BNO086 GND ──── BMP390 GND
 
-ESP32 GPIO16 (RX2) ──── GPS TX
-ESP32 GPIO17 (TX2) ──── GPS RX
-ESP32 VIN (5V)     ──── GPS VCC
-ESP32 GND          ──── GPS GND
+ESP32-S3 GPIO16 (RX2) ──── GPS TX
+ESP32-S3 GPIO17 (TX2) ──── GPS RX
+ESP32-S3 VIN (5V)     ──── GPS VCC
+ESP32-S3 GND          ──── GPS GND
 ```
 
-The BNO086 and BMP390 are powered from the ESP32 3.3 V rail. The GPS module
-is powered from the 5 V VIN pin (most u-blox breakouts have an onboard
-regulator).
+The BNO086 and BMP390 are powered from the ESP32-S3 3.3 V rail via the Qwiic
+connector. The GPS module is powered from the 5 V VIN pin (most u-blox
+breakouts have an onboard regulator).
 
 ## Dependencies
 
@@ -84,32 +102,109 @@ URLs**:
 https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 ```
 
-Then install **esp32** by Espressif Systems in the Board Manager.
+Then install **esp32** by Espressif Systems (v3.x) in the Board Manager.
 
 ## Build & Flash
 
-| Setting | Value |
-|---------|-------|
-| Board | ESP32 Dev Module |
-| CPU Frequency | 240 MHz |
-| Flash Size | 4 MB |
-| Upload Speed | 921600 |
-| Port | your USB serial port |
-
-### Command line (Arduino IDE 1.8.x via Flatpak)
+The SparkFun Thing Plus ESP32-S3 uses native USB CDC (no external USB-serial
+chip). With Arduino IDE 1.8.x and esptool v5.x, a two-step process is
+required:
 
 ```bash
-# Compile
+# Step 1: Compile with explicit build path
 flatpak run cc.arduino.arduinoide --verify \
-  --board esp32:esp32:esp32:UploadSpeed=921600 \
+  --board esp32:esp32:sparkfun_esp32s3_thing_plus:UploadSpeed=921600,CDCOnBoot=cdc \
+  --pref build.path=build \
   esp32-ahrs-gdl90.ino
 
-# Flash
-flatpak run cc.arduino.arduinoide --upload \
-  --board esp32:esp32:esp32:UploadSpeed=921600 \
-  --port /dev/ttyUSB0 \
-  esp32-ahrs-gdl90.ino
+# Step 2: Flash merged binary
+esptool --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
+  write-flash 0x0 build/esp32-ahrs-gdl90.ino.merged.bin
 ```
+
+To reset settings to factory defaults, erase the NVS partition before flashing:
+
+```bash
+esptool --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
+  erase-region 0x9000 0x5000
+```
+
+### Arduino IDE GUI
+
+| Setting | Value |
+|---------|-------|
+| Board | SparkFun Thing Plus ESP32-S3 |
+| USB CDC On Boot | Enabled |
+| Upload Speed | 921600 |
+| Port | `/dev/ttyACM0` (Linux) or the appropriate COM port |
+
+## Web Configuration UI
+
+Once running, open `http://192.168.10.1` in a browser (Standalone Mode)
+or the device's assigned IP (Companion Mode).
+
+### Live Status
+
+Real-time display updated every second:
+- Roll, Pitch, Heading (with source: GPS or IMU)
+- Barometric altitude
+- GPS fix status and satellite count
+- WiFi clients / RSSI
+- Sensor status indicators (green = OK, red = failed)
+- Uptime
+
+### BNO086 Calibration
+
+Guided three-step calibration with live accuracy feedback:
+
+1. **Gyro** -- place device flat, hold still for 3 seconds
+2. **Accel** -- rotate to 4-6 unique orientations, hold each 1 second
+3. **Mag** -- rotate ~180° and back in each axis (roll, pitch, yaw)
+
+Accuracy indicators (0-3) are color-coded: red (unreliable), orange (low),
+yellow (medium), green (high). When all sensors reach 2+, click **Save** to
+persist calibration data (DCD) to the BNO086's internal flash.
+
+### Settings
+
+All settings are persisted in NVS flash and applied on next reboot.
+
+**Operating Mode:**
+- Auto -- scans for Stratux WiFi, falls back to Standalone
+- Force Standalone -- always creates own AP
+- Force Companion -- always tries to join Stratux
+
+**WiFi:**
+- AP SSID and password (Standalone Mode)
+- Stratux SSID to scan for (Companion Mode)
+
+**Message Toggles:**
+- AHRS (0x65/0x01)
+- Ownship Report (0x0A + 0x0B)
+- Heartbeat (0x00)
+- ForeFlight ID (0x65/0x00)
+- XGPS (port 49002)
+- XATT (port 49002)
+
+**Sensor Options:**
+- BNO086 (IMU) enable/disable
+- BMP390 (Baro) enable/disable
+- GPS enable/disable
+- Invert Roll axis
+- Game Rotation Vector (no magnetometer; default on)
+
+### REST API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Web UI (HTML page) |
+| GET | `/api/status` | Live sensor data, accuracy, stability, calibration state |
+| GET | `/api/settings` | Current saved settings (from NVS) |
+| POST | `/api/settings` | Save settings to NVS (applied on reboot) |
+| POST | `/api/reboot` | Reboot the device |
+| POST | `/api/calibration/start` | Enter calibration mode (accel+gyro+mag) |
+| POST | `/api/calibration/save` | Save DCD to BNO086 flash, return to flight mode |
+| POST | `/api/calibration/cancel` | Cancel calibration, return to flight mode |
 
 ## Operating Modes
 
@@ -117,23 +212,22 @@ flatpak run cc.arduino.arduinoide --upload \
 
 When no Stratux WiFi is found the device creates its own access point:
 
-| Parameter | Value |
-|-----------|-------|
-| SSID | `AHRS-GDL90` |
-| Password | `ahrs1234` |
+| Parameter | Default |
+|-----------|---------|
+| SSID | `AHRS-GDL90` (configurable) |
+| Password | `ahrs1234` (configurable) |
 | IP Address | 192.168.10.1 |
 | GDL90 Port | UDP 4000 |
 | ForeFlight Text Port | UDP 49002 |
-| Broadcast | 192.168.10.255 |
 
-The ESP32 provides all data: AHRS, GPS, barometric altitude, Heartbeat and
+The device provides all data: AHRS, GPS, barometric altitude, Heartbeat and
 ForeFlight Device ID.
 
 ### Companion Mode (with Stratux)
 
-At boot the device scans for WiFi networks named `stratux` or `Stratux`
-(case-insensitive). If found, it joins the Stratux network as a client
-and broadcasts on the Stratux subnet.
+At boot the device scans for WiFi networks matching the configured Stratux
+SSID (default: `stratux`, case-insensitive). If found, it joins the Stratux
+network as a client and broadcasts on the Stratux subnet.
 
 ```
 ┌──────────┐                              ┌──────────┐
@@ -149,18 +243,35 @@ and broadcasts on the Stratux subnet.
                    └─────────┘                       └──────────┘
 ```
 
-**Stratux settings** (recommended for Companion Mode):
+**Recommended Stratux settings** (to avoid conflicts):
 - AHRS: **off** (ESP32 provides better AHRS via BNO086)
 - Ownship Report: **off** (ESP32 provides it with BMP390 baro)
 - ADS-B traffic: **on**
 
-**Sensor comparison:**
+Alternatively, use the Web UI to disable Ownship and ForeFlight ID on the
+ESP32 side -- whichever approach avoids duplicate messages on the subnet.
 
-| Sensor | Stratux | ESP32 AHRS | Advantage |
-|--------|---------|------------|-----------|
-| IMU | ICM-20948 (software Kalman) | BNO086 (hardware fusion) | Much lower drift & latency |
-| Barometer | BMP280 (±0.12 hPa) | BMP390 (±0.03 hPa) | 4x more accurate |
-| Baro noise | 1.3 Pa RMS | 0.02 Pa RMS | 65x less noise |
+## Sensor Fusion Modes
+
+| Aspect | ARVR Stab. Rotation Vector | ARVR Stab. Game Rotation Vector (default) |
+|--------|----------------------------|-------------------------------------------|
+| Heading source | Magnetometer | Gyro-only (drifts slowly) |
+| Cockpit interference | Affected by avionics/engine magnetics | Immune |
+| Pitch/Roll accuracy | 1.5-2.5° | 1.0-2.5° |
+| Calibration needed | Accel + Gyro + Mag | Accel + Gyro only |
+| Best for | Handheld / unshielded use | Cockpit-mounted (recommended) |
+
+The Game Rotation Vector is the default because cockpit magnetic interference
+makes magnetometer-based heading unreliable. GPS track is used as the primary
+heading source above 5 kt ground speed.
+
+## Sensor Comparison
+
+| Sensor | Stratux (stock) | ESP32 AHRS (this project) |
+|--------|-----------------|---------------------------|
+| IMU | ICM-20948 (software Kalman) | BNO086 (hardware fusion, 50 Hz) |
+| Barometer | BMP280 (±0.12 hPa) | BMP390 (±0.03 hPa) |
+| Baro noise | 1.3 Pa RMS | 0.02 Pa RMS (65x less) |
 
 ## EFB App Setup
 
@@ -217,8 +328,8 @@ All messages use GDL90 framing (0x7E flag bytes, byte-stuffing, CRC-16 CCITT).
 
 - **GPS track** is used as heading when the fix is valid and ground speed
   exceeds 5 knots.
-- **BNO086 yaw** (ARVR Stabilized Rotation Vector) is used as heading when
-  there is no GPS fix or speed is below 5 knots.
+- **BNO086 yaw** is used as heading when there is no GPS fix or speed is
+  below 5 knots.
 
 ## Altitude
 
@@ -238,22 +349,48 @@ At 115200 baud the system prints status every 2 seconds:
 
 ## Error Handling
 
-- If BNO086 or BMP390 is not detected at startup the system halts with an
-  error message on Serial.
+- If a sensor (BNO086, BMP390, GPS) is not detected at startup it is disabled
+  and the system continues without it. The Web UI shows the sensor status.
 - If the BNO086 stops reporting for more than 2 seconds a re-initialisation
-  is attempted automatically (max once per 10 s).
+  is attempted automatically (max once per 10 s). If re-init fails, the IMU
+  is disabled gracefully.
 - If GPS has no fix, NIC and NACp are set to 0, heading falls back to the
   IMU, and only pressure altitude is available.
+
+## 3D Printed Case
+
+A parametric OpenSCAD enclosure is included in the `case/` directory.
+Pre-exported STL files are ready for slicing.
+
+```
+case/
+  esp32_case_v2.scad         Parametric source (OpenSCAD)
+  esp32_case_v2_base.stl     Base shell with screw bosses, USB-C and cable slots
+  esp32_case_v2_lid.stl      Snap-fit lid with BNO086 + BMP390 mounting
+```
+
+**Dimensions:** 62 x 31 x 16 mm. Fits the SparkFun Thing Plus ESP32-S3 in the
+base with BNO086 and BMP390 mounted on the lid via M2 standoffs.
+
+To re-export STLs after editing:
+
+```bash
+openscad -D 'part="base"' -o case/esp32_case_v2_base.stl case/esp32_case_v2.scad
+openscad -D 'part="lid"'  -o case/esp32_case_v2_lid.stl  case/esp32_case_v2.scad
+```
 
 ## Project Structure
 
 ```
 esp32-ahrs-gdl90/
-  esp32-ahrs-gdl90.ino   Main sketch -- WiFi AP, timing loops, sensor polling
+  esp32-ahrs-gdl90.ino   Main sketch -- WiFi, timing loops, sensor polling, web server
   gdl90.h / gdl90.cpp    GDL90 protocol -- CRC-16, framing, message builders
-  bno086.h / bno086.cpp   BNO086 IMU driver -- quaternion to Euler conversion
-  bmp390.h / bmp390.cpp   BMP390 barometer driver -- pressure altitude
-  gps.h / gps.cpp         u-blox GPS NMEA parser
+  bno086.h / bno086.cpp   BNO086 IMU -- init, quaternion to Euler, calibration, watchdog
+  bmp390.h / bmp390.cpp   BMP390 barometer -- pressure to altitude conversion
+  gps.h / gps.cpp         u-blox GPS NMEA parser (TinyGPSPlus wrapper)
+  config.h                Configuration struct, NVS load/save, defaults
+  webui.h                 Embedded HTML/CSS/JS for the Web Configuration UI
+  case/                   3D-printable enclosure (OpenSCAD + STL)
 ```
 
 ## License
