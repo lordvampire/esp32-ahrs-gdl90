@@ -47,6 +47,9 @@ public:
     // Check if watchdog expired (no data for BNO086_WATCHDOG_MS)
     bool isWatchdogExpired() const;
 
+    // Reset watchdog timer (call after long blocking operations like WiFi scan)
+    void resetWatchdog();
+
     // Accuracy (0-3) for quaternion and magnetometer
     uint8_t getAccuracy() const;
     uint8_t getMagAccuracy() const;

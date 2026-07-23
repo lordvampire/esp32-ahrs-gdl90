@@ -30,10 +30,15 @@ Working ForeFlight-compatible AHRS with dual-mode operation:
 
 ### Build Command
 ```bash
-flatpak run cc.arduino.arduinoide --upload \
-  --board esp32:esp32:esp32s3:UploadSpeed=921600,CDCOnBoot=1 \
-  --port /dev/ttyACM0 \
+# Step 1: Compile with explicit build path
+flatpak run cc.arduino.arduinoide --verify \
+  --board esp32:esp32:sparkfun_esp32s3_thing_plus:UploadSpeed=921600,CDCOnBoot=cdc \
+  --pref build.path=build \
   esp32-ahrs-gdl90.ino
+
+# Step 2: Flash merged binary (esptool v5.x)
+esptool --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
+  write-flash 0x0 build/esp32-ahrs-gdl90.ino.merged.bin
 ```
 
 ### REST Endpoints

@@ -31,6 +31,11 @@ bool BNO086Handler::begin(TwoWire &wire) {
                 // Stability classifier at 1 Hz
                 _imu.enableStabilityClassifier(1000);
 
+                // Consume the post-begin reset flag so the wasReset()
+                // handler in update() doesn't fire before _sensor_value
+                // is initialised by the first getSensorEvent() call.
+                _imu.wasReset();
+
                 _lastUpdateMs = millis();
                 return true;
             }
@@ -68,6 +73,7 @@ bool BNO086Handler::reinit() {
             if (enableReport()) {
                 _imu.enableStabilityClassifier(1000);
                 if (_calibrating) _imu.enableMagnetometer(500);
+                _imu.wasReset();  // consume reset flag
                 _lastUpdateMs = millis();
                 return true;
             }
@@ -80,6 +86,7 @@ bool BNO086Handler::reinit() {
 bool BNO086Handler::update() {
     if (_imu.wasReset()) {
         // Re-configure everything after unexpected reset
+        Serial.println("BNO086 reset detected, reinitializing...");
         if (_calibrating) {
             _imu.setCalibrationConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
         } else {
@@ -186,6 +193,10 @@ unsigned long BNO086Handler::getLastUpdateMs() const { return _lastUpdateMs; }
 
 bool BNO086Handler::isWatchdogExpired() const {
     return (millis() - _lastUpdateMs) > BNO086_WATCHDOG_MS;
+}
+
+void BNO086Handler::resetWatchdog() {
+    _lastUpdateMs = millis();
 }
 
 uint8_t BNO086Handler::getAccuracy() const { return _accuracy; }

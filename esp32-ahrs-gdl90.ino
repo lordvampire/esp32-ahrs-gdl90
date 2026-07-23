@@ -253,6 +253,10 @@ void handleGetStatus() {
 }
 
 void handleGetSettings() {
+    // Read saved settings from NVS (may differ from running config)
+    Config saved;
+    loadConfig(saved);
+
     char json[512];
     snprintf(json, sizeof(json),
         "{\"mode\":%u,"
@@ -264,20 +268,20 @@ void handleGetSettings() {
         "\"invertRoll\":%s,"
         "\"enableBNO086\":%s,\"enableBMP390\":%s,\"enableGPS\":%s,"
         "\"useGameRV\":%s}",
-        config.mode,
-        config.apSSID, config.apPassword,
-        config.stratuxSSID,
-        config.sendAHRS      ? "true" : "false",
-        config.sendOwnship   ? "true" : "false",
-        config.sendHeartbeat ? "true" : "false",
-        config.sendFFID       ? "true" : "false",
-        config.sendXGPS       ? "true" : "false",
-        config.sendXATT       ? "true" : "false",
-        config.invertRoll     ? "true" : "false",
-        config.enableBNO086   ? "true" : "false",
-        config.enableBMP390   ? "true" : "false",
-        config.enableGPS      ? "true" : "false",
-        config.useGameRV      ? "true" : "false");
+        saved.mode,
+        saved.apSSID, saved.apPassword,
+        saved.stratuxSSID,
+        saved.sendAHRS      ? "true" : "false",
+        saved.sendOwnship   ? "true" : "false",
+        saved.sendHeartbeat ? "true" : "false",
+        saved.sendFFID       ? "true" : "false",
+        saved.sendXGPS       ? "true" : "false",
+        saved.sendXATT       ? "true" : "false",
+        saved.invertRoll     ? "true" : "false",
+        saved.enableBNO086   ? "true" : "false",
+        saved.enableBMP390   ? "true" : "false",
+        saved.enableGPS      ? "true" : "false",
+        saved.useGameRV      ? "true" : "false");
 
     server.send(200, "application/json", json);
 }
@@ -285,9 +289,10 @@ void handleGetSettings() {
 void handlePostSettings() {
     String body = server.arg("plain");
 
-    // Minimal JSON parsing — look for key:value pairs
+    // Minimal JSON parsing — look for "key":value pairs (quoted keys)
     auto jsonBool = [&](const char *key) -> int {
-        int idx = body.indexOf(key);
+        String needle = String("\"") + key + "\"";
+        int idx = body.indexOf(needle);
         if (idx < 0) return -1;
         int colon = body.indexOf(':', idx);
         if (colon < 0) return -1;
@@ -321,27 +326,31 @@ void handlePostSettings() {
         return val.toInt();
     };
 
-    int mode = jsonInt("mode");
-    if (mode >= 0 && mode <= 2) config.mode = (uint8_t)mode;
+    // Parse into a COPY — don't touch the live config.
+    // Changes only take effect after reboot.
+    Config pending = config;
 
-    jsonStr("apSSID",      config.apSSID,      sizeof(config.apSSID));
-    jsonStr("apPassword",  config.apPassword,  sizeof(config.apPassword));
-    jsonStr("stratuxSSID", config.stratuxSSID,  sizeof(config.stratuxSSID));
+    int mode = jsonInt("mode");
+    if (mode >= 0 && mode <= 2) pending.mode = (uint8_t)mode;
+
+    jsonStr("apSSID",      pending.apSSID,      sizeof(pending.apSSID));
+    jsonStr("apPassword",  pending.apPassword,  sizeof(pending.apPassword));
+    jsonStr("stratuxSSID", pending.stratuxSSID,  sizeof(pending.stratuxSSID));
 
     int v;
-    v = jsonBool("sendAHRS");      if (v >= 0) config.sendAHRS      = v;
-    v = jsonBool("sendOwnship");   if (v >= 0) config.sendOwnship   = v;
-    v = jsonBool("sendHeartbeat"); if (v >= 0) config.sendHeartbeat  = v;
-    v = jsonBool("sendFFID");      if (v >= 0) config.sendFFID       = v;
-    v = jsonBool("sendXGPS");      if (v >= 0) config.sendXGPS       = v;
-    v = jsonBool("sendXATT");      if (v >= 0) config.sendXATT       = v;
-    v = jsonBool("invertRoll");    if (v >= 0) config.invertRoll     = v;
-    v = jsonBool("enableBNO086");  if (v >= 0) config.enableBNO086   = v;
-    v = jsonBool("enableBMP390");  if (v >= 0) config.enableBMP390   = v;
-    v = jsonBool("enableGPS");     if (v >= 0) config.enableGPS      = v;
-    v = jsonBool("useGameRV");     if (v >= 0) config.useGameRV      = v;
+    v = jsonBool("sendAHRS");      if (v >= 0) pending.sendAHRS      = v;
+    v = jsonBool("sendOwnship");   if (v >= 0) pending.sendOwnship   = v;
+    v = jsonBool("sendHeartbeat"); if (v >= 0) pending.sendHeartbeat  = v;
+    v = jsonBool("sendFFID");      if (v >= 0) pending.sendFFID       = v;
+    v = jsonBool("sendXGPS");      if (v >= 0) pending.sendXGPS       = v;
+    v = jsonBool("sendXATT");      if (v >= 0) pending.sendXATT       = v;
+    v = jsonBool("invertRoll");    if (v >= 0) pending.invertRoll     = v;
+    v = jsonBool("enableBNO086");  if (v >= 0) pending.enableBNO086   = v;
+    v = jsonBool("enableBMP390");  if (v >= 0) pending.enableBMP390   = v;
+    v = jsonBool("enableGPS");     if (v >= 0) pending.enableGPS      = v;
+    v = jsonBool("useGameRV");     if (v >= 0) pending.useGameRV      = v;
 
-    saveConfig(config);
+    saveConfig(pending);
 
     server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -392,48 +401,14 @@ void setup() {
     Serial.print("Config loaded. Mode: ");
     Serial.println(config.mode == 0 ? "Auto" : config.mode == 1 ? "Force-Standalone" : "Force-Companion");
 
-    // ---- BNO086 init -------------------------------------------------------
-    if (config.enableBNO086) {
-        Serial.print("Initializing BNO086... ");
-        imu.setUseGameRV(config.useGameRV);
-        if (imu.begin(Wire)) {
-            bno086ok = true;
-            Serial.print("OK (");
-            Serial.print(config.useGameRV ? "Game RV" : "Rotation Vector");
-            Serial.println(")");
-        } else {
-            Serial.println("FAILED — BNO086 not found. Continuing without IMU.");
-        }
-    } else {
-        Serial.println("BNO086 disabled in config.");
-    }
-
-    // ---- BMP390 init -------------------------------------------------------
-    if (config.enableBMP390) {
-        Serial.print("Initializing BMP390... ");
-        if (baro.begin(Wire)) {
-            bmp390ok = true;
-            Serial.println("OK");
-        } else {
-            Serial.println("FAILED — BMP390 not found. Continuing without Baro.");
-        }
-    } else {
-        Serial.println("BMP390 disabled in config.");
-    }
-
-    // ---- GPS init ----------------------------------------------------------
-    if (config.enableGPS) {
-        Serial.print("Initializing GPS (UART2)... ");
-        gps.begin();
-        Serial.println("OK (waiting for fix)");
-    } else {
-        Serial.println("GPS disabled in config.");
-    }
-
-    // ---- WiFi mode detection (respects config.mode) ------------------------
+    // ---- WiFi setup FIRST --------------------------------------------------
+    // WiFi scan + AP start can take several seconds.  The BNO086 does NOT
+    // support I2C polling (datasheet §1.2.2) and times out after ~10 ms
+    // without a read (§1.2.4.1).  Initializing the IMU before WiFi would
+    // leave it unread during the scan, corrupting its SHTP protocol state.
+    // Therefore: WiFi first, sensors last.
     Serial.println();
     if (config.mode == 0) {
-        // Auto: scan for Stratux (current v0.2 behavior)
         if (scanForStratux()) {
             if (connectToStratux()) {
                 opMode = MODE_COMPANION;
@@ -447,7 +422,6 @@ void setup() {
             }
         }
     } else if (config.mode == 2) {
-        // Force-Companion: skip scan, connect directly
         Serial.println("Force-Companion mode: connecting to Stratux...");
         stratuxSSID = config.stratuxSSID;
         if (connectToStratux()) {
@@ -459,19 +433,24 @@ void setup() {
             opMode = MODE_STANDALONE;
         }
     }
-    // config.mode == 1 (Force-Standalone) skips all scanning
 
     if (opMode == MODE_STANDALONE) {
-        // ---- STANDALONE MODE -----------------------------------------------
         Serial.println();
         Serial.println(">>> STANDALONE MODE <<<");
         Serial.print("Starting WiFi AP... ");
+
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        delay(200);
+
         WiFi.mode(WIFI_AP);
-        delay(100);
+        delay(200);
+        WiFi.setSleep(false);
+        WiFi.setTxPower(WIFI_POWER_19_5dBm);
         WiFi.softAPConfig(AP_IP, AP_IP, AP_SUBNET);
         delay(100);
         WiFi.softAP(config.apSSID, config.apPassword, 1, 0, 4);
-        delay(500);
+        delay(1000);
         Serial.print("SSID: ");
         Serial.print(config.apSSID);
         Serial.print("  IP: ");
@@ -501,6 +480,42 @@ void setup() {
     server.on("/api/calibration/cancel", HTTP_POST, handleCalCancel);
     server.begin();
     Serial.println("WebServer started on port 80");
+
+    // ---- Sensor init AFTER WiFi (no long gaps before loop() reads) ---------
+    if (config.enableBNO086) {
+        Serial.print("Initializing BNO086... ");
+        imu.setUseGameRV(config.useGameRV);
+        if (imu.begin(Wire)) {
+            bno086ok = true;
+            Serial.print("OK (");
+            Serial.print(config.useGameRV ? "Game RV" : "Rotation Vector");
+            Serial.println(")");
+        } else {
+            Serial.println("FAILED — BNO086 not found. Continuing without IMU.");
+        }
+    } else {
+        Serial.println("BNO086 disabled in config.");
+    }
+
+    if (config.enableBMP390) {
+        Serial.print("Initializing BMP390... ");
+        if (baro.begin(Wire)) {
+            bmp390ok = true;
+            Serial.println("OK");
+        } else {
+            Serial.println("FAILED — BMP390 not found. Continuing without Baro.");
+        }
+    } else {
+        Serial.println("BMP390 disabled in config.");
+    }
+
+    if (config.enableGPS) {
+        Serial.print("Initializing GPS (UART2)... ");
+        gps.begin();
+        Serial.println("OK (waiting for fix)");
+    } else {
+        Serial.println("GPS disabled in config.");
+    }
 
     Serial.println();
     Serial.println("Setup complete. Running...");
@@ -545,7 +560,8 @@ void loop() {
             if (imu.reinit()) {
                 Serial.println("BNO086 re-initialized OK");
             } else {
-                Serial.println("BNO086 re-init FAILED");
+                Serial.println("BNO086 re-init FAILED — disabling IMU");
+                bno086ok = false;
             }
         }
     }

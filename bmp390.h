@@ -5,8 +5,8 @@
 #include <Wire.h>
 #include <Adafruit_BMP3XX.h>
 
-// I2C address for BMP390 (default 0x77, SDO pulled high)
-#define BMP390_ADDR 0x77
+// I2C address for BMP390 (0x76 = SDO low/GND, 0x77 = SDO high/VCC)
+#define BMP390_ADDR 0x76
 
 class BMP390Handler {
 public:

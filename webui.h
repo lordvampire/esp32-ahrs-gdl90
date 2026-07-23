@@ -32,6 +32,7 @@ input[type=checkbox]{width:18px;height:18px;accent-color:#4fc3f7}
 .btn-row{display:flex;gap:8px;margin-top:12px}
 button{flex:1;padding:10px;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer}
 #btnSave{background:#1565c0;color:#fff}
+#btnSave:disabled{opacity:0.4;cursor:not-allowed}
 #btnSave:hover{background:#1976d2}
 #btnReboot{background:#b71c1c;color:#fff}
 #btnReboot:hover{background:#c62828}
@@ -133,7 +134,7 @@ button{flex:1;padding:10px;border:none;border-radius:6px;font-size:14px;font-wei
 <label><span>Game Rotation Vector (no Mag)</span><input type="checkbox" id="cfgGameRV"></label>
 
 <div class="btn-row">
-<button id="btnSave" onclick="saveSettings()">Save</button>
+<button id="btnSave" onclick="saveSettings()" disabled>Save</button>
 <button id="btnReboot" onclick="reboot()">Reboot</button>
 </div>
 <div id="msg"></div>
@@ -157,6 +158,7 @@ function accHTML(val){
 }
 
 var calActive=false;
+var settingsLoaded=false;
 
 function updateStatus(){
   fetch('/api/status').then(function(r){return r.json()}).then(function(d){
@@ -246,10 +248,14 @@ function loadSettings(){
     $('cfgGPSEn').checked=d.enableGPS;
     $('cfgInvertRoll').checked=d.invertRoll;
     $('cfgGameRV').checked=d.useGameRV;
-  }).catch(function(){$('msg').textContent='Failed to load settings';});
+    settingsLoaded=true;
+    $('btnSave').disabled=false;
+    $('btnSave').style.opacity='1';
+  }).catch(function(){$('msg').textContent='Failed to load settings';$('msg').style.color='#ef5350';});
 }
 
 function saveSettings(){
+  if(!settingsLoaded){$('msg').textContent='Settings not loaded yet';$('msg').style.color='#ef5350';return;}
   var body=JSON.stringify({
     mode:parseInt($('cfgMode').value),
     apSSID:$('cfgApSSID').value,
